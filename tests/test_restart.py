@@ -1,11 +1,16 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
 
-from hard_restart_claude_code import restart as restart_mod
-from hard_restart_claude_code.restart import CompletedLike, Result, find_pids, hard_restart
+from hard_restart_claude_code.restart import (
+    CompletedLike,
+    Result,
+    discover_exe,
+    find_pids,
+    hard_restart,
+)
 
 
 def test_find_pids_parses_powershell_output():
@@ -27,7 +32,7 @@ def test_find_pids_ignores_non_numeric_lines():
 
 def test_hard_restart_kills_then_launches(tmp_path):
     exe = tmp_path / "claude.exe"
-    exe.write_text("")  # exists
+    exe.write_text("")
     events = []
 
     result = hard_restart(
@@ -101,5 +106,39 @@ def test_hard_restart_missing_exe_raises(tmp_path):
         )
 
 
-def test_default_exe_path_is_d_drive():
-    assert str(restart_mod.DEFAULT_EXE).startswith("D:\\WindowsApps\\Claude_")
+def _make_install(root: Path) -> Path:
+    app = root / "app"
+    app.mkdir(parents=True)
+    exe = app / "claude.exe"
+    exe.write_text("")
+    return exe
+
+
+def test_discover_exe_returns_path_under_install_location(tmp_path):
+    exe = _make_install(tmp_path)
+    captured = {}
+
+    def runner(cmd):
+        captured["cmd"] = cmd
+        return CompletedLike(stdout=f"{tmp_path}\n")
+
+    assert discover_exe(runner) == exe
+    assert "Get-AppxPackage" in " ".join(captured["cmd"])
+    assert "-Name 'Claude'" in " ".join(captured["cmd"])
+
+
+def test_discover_exe_returns_none_when_package_missing(tmp_path):
+    runner = lambda _cmd: CompletedLike(stdout="")
+    assert discover_exe(runner) is None
+
+
+def test_discover_exe_returns_none_when_exe_does_not_exist(tmp_path):
+    # InstallLocation exists but app/claude.exe inside does not.
+    runner = lambda _cmd: CompletedLike(stdout=f"{tmp_path}\n")
+    assert discover_exe(runner) is None
+
+
+def test_discover_exe_strips_whitespace(tmp_path):
+    exe = _make_install(tmp_path)
+    runner = lambda _cmd: CompletedLike(stdout=f"  {tmp_path}  \n\n")
+    assert discover_exe(runner) == exe

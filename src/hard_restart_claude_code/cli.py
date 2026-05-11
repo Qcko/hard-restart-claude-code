@@ -1,17 +1,25 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import sys
 from pathlib import Path
 
-from .restart import DEFAULT_EXE, hard_restart
+from .restart import discover_exe, hard_restart
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    exe = args.exe or discover_exe()
+    if exe is None:
+        print(
+            "error: could not locate Claude Desktop install under any "
+            "WindowsApps directory. Pass --exe to point at claude.exe.",
+            file=sys.stderr,
+        )
+        return 2
     try:
-        result = hard_restart(args.exe, dry_run=args.dry_run, no_launch=args.no_launch)
+        result = hard_restart(exe, dry_run=args.dry_run, no_launch=args.no_launch)
     except FileNotFoundError as err:
         print(f"error: {err}", file=sys.stderr)
         return 2
@@ -27,8 +35,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--exe",
         type=Path,
-        default=DEFAULT_EXE,
-        help=f"Path to claude.exe (default: {DEFAULT_EXE})",
+        default=None,
+        help="Path to claude.exe (default: auto-discover newest Claude_* under WindowsApps).",
     )
     parser.add_argument(
         "--dry-run",

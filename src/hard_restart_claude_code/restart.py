@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import subprocess
 import time
@@ -6,9 +6,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_EXE = Path(r"D:\WindowsApps\Claude_1.6608.2.0_x64__pzs8sxrjxfjjc\app\claude.exe")
 PROCESS_BASENAME = "claude"
 INSTALL_HINT = r"WindowsApps\Claude_"
+APPX_PACKAGE_NAME = "Claude"
+EXE_RELATIVE = Path("app") / "claude.exe"
 
 Runner = Callable[[Sequence[str]], "CompletedLike"]
 
@@ -24,6 +25,31 @@ class Result:
     killed: list[int]
     launched: bool
     exe: Path
+
+
+def discover_exe(runner: Runner | None = None) -> Path | None:
+    runner = runner or _default_capture
+    install_location = _query_install_location(runner)
+    if not install_location:
+        return None
+    exe = install_location / EXE_RELATIVE
+    return exe if exe.is_file() else None
+
+
+def _query_install_location(runner: Runner) -> Path | None:
+    cmd = [
+        "powershell",
+        "-NoProfile",
+        "-Command",
+        f"Get-AppxPackage -Name '{APPX_PACKAGE_NAME}' -ErrorAction SilentlyContinue | "
+        f"Select-Object -ExpandProperty InstallLocation",
+    ]
+    proc = runner(cmd)
+    for line in proc.stdout.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return Path(stripped)
+    return None
 
 
 def find_pids(runner: Runner | None = None) -> list[int]:
@@ -52,7 +78,7 @@ def launch(exe: Path, launcher: Callable[[Path], None] | None = None) -> None:
 
 
 def hard_restart(
-    exe: Path = DEFAULT_EXE,
+    exe: Path,
     *,
     dry_run: bool = False,
     no_launch: bool = False,
