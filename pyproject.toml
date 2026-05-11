@@ -1,0 +1,24 @@
+[project]
+name = "hard-restart-claude-code"
+version = "0.1.0"
+description = "Hard-restart the Claude Desktop app on Windows: kill all matching processes, relaunch."
+readme = "README.md"
+authors = [
+    { name = "Qcko", email = "komec@centrum.cz" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+hard-restart-claude-code = "hard_restart_claude_code:main"
+hrcc = "hard_restart_claude_code:main"
+
+[build-system]
+requires = ["uv_build>=0.11.11,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "ruff>=0.15.12",
+]
