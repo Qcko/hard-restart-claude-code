@@ -44,8 +44,8 @@ Claude Desktop install directory, kill them all, then relaunch.
   touching real processes.
 - **Fail loudly on missing exe**, not silently. Exit code 2 from the CLI.
 - **Stay consistent with `localguard`** — same project layout, same `uv` flow,
-  same `BRIEF.md` / `SESSION.md` convention, same `E:\uv\tools\bin` install
-  location. The two tools are siblings.
+  same `BRIEF.md` / `SESSION.md` convention, same `uv tool` install location.
+  The two tools are siblings.
 
 ## Success criteria
 

@@ -7,12 +7,13 @@ Useful when Claude Code's hook config (or any other config read at session start
 ## Install
 
 ```powershell
-$env:UV_TOOL_DIR = "E:\uv\tools"
-$env:UV_TOOL_BIN_DIR = "E:\uv\tools\bin"
-uv tool install --editable E:\dev\hard-restart-claude-code --force
+# Optional: route uv tool installs off the system drive
+# $env:UV_TOOL_DIR     = "<your-tools-dir>"
+# $env:UV_TOOL_BIN_DIR = "<your-tools-bin-dir>"
+uv tool install --editable . --force
 ```
 
-After install, the binary lives at `E:\uv\tools\bin\hard-restart-claude-code.exe` (and `hrcc.exe`).
+After install, the binary lives at `<UV_TOOL_BIN_DIR>\hard-restart-claude-code.exe` (and `hrcc.exe`). With no overrides, `uv` places it under your user data dir — run `uv tool dir --bin` to see where.
 
 ## Usage
 
@@ -32,6 +33,5 @@ Lists `claude` processes via `Get-Process` and keeps only those whose `Path` con
 ## Tests
 
 ```powershell
-cd E:\dev\hard-restart-claude-code
 uv run pytest
 ```
