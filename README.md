@@ -24,11 +24,19 @@ hrcc --no-launch      # kill only, do not relaunch
 hrcc --exe <path>     # override the Claude Desktop exe path
 ```
 
-Default exe: `D:\WindowsApps\Claude_1.6608.2.0_x64__pzs8sxrjxfjjc\app\claude.exe`. Override with `--exe` if your version directory differs.
+The exe is discovered at run time via `Get-AppxPackage -Name 'Claude'`, so it follows Store updates. Override with `--exe` if discovery fails.
 
 ## How it matches processes
 
-Lists `claude` processes via `Get-Process` and keeps only those whose `Path` contains `WindowsApps\Claude_`. This avoids killing unrelated `claude` binaries (e.g. the Claude Code CLI or its node host).
+Lists `claude.exe` processes via `Get-CimInstance Win32_Process` and keeps only those whose `ExecutablePath` contains `WindowsApps\Claude_`. This avoids killing unrelated `claude` binaries (e.g. the Claude Code CLI or its node host) — the path anchor is deliberately narrow, and a test asserts it never widens.
+
+Processes are killed individually (`taskkill /F /PID`), not as a tree. `hrcc` is usually run from a shell inside Claude Desktop, so a tree kill would terminate `hrcc` itself before it could relaunch anything.
+
+## Account profiles
+
+Claude Desktop selects an account with `--user-data-dir`. `hrcc` reads that flag from the processes it is about to kill and reproduces it on relaunch, so restarting does not move you to a different account. Run `hrcc --dry-run` to see which profile it detected.
+
+If two different profiles are running at once, `hrcc` relaunches only the lowest-pid one and warns on stderr.
 
 ## Tests
 

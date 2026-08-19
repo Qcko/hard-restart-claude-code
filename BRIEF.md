@@ -34,6 +34,24 @@ Claude Desktop install directory, kill them all, then relaunch.
 - Restoring window layout / open conversations after restart.
 - A GUI / tray icon. CLI is enough.
 
+## Scope (v1.1) — preserve the running profile
+
+`hrcc` relaunches Claude Desktop with the `--user-data-dir` it was already
+running under, rather than always launching bare. Restoring the session that
+was running is a refinement of "relaunch the app", not a new responsibility:
+the tool observes its own target's argv, and takes no dependency on whatever
+put that flag there.
+
+Still out of scope, and stated so it reads as considered rather than forgotten:
+
+- **Taking a blocked MSIX update.** When "Relaunch to update" fails with "another
+  program is currently using this file", the blocker is a browser
+  native-messaging host living inside the package (see `DESIGN.md`). The fix is
+  to remove the browser extension; `hrcc` does not kill browser-owned processes
+  or wait on Windows deployments.
+- **Any flag other than `--user-data-dir`.** Preserved argv is an allowlist, not
+  a general replay of the old command line.
+
 ## Design principles
 
 - **Match by install path, not just name.** `claude.exe` is also the name of

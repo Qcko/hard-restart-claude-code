@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import sys
@@ -13,8 +13,9 @@ def main(argv: list[str] | None = None) -> int:
     exe = args.exe or discover_exe()
     if exe is None:
         print(
-            "error: could not locate Claude Desktop install under any "
-            "WindowsApps directory. Pass --exe to point at claude.exe.",
+            "error: could not resolve a single Claude Desktop install - either "
+            "none was found, or more than one package is present (which happens "
+            "mid-update). Pass --exe to point at claude.exe.",
             file=sys.stderr,
         )
         return 2
@@ -56,6 +57,7 @@ def print_result(result, *, dry_run: bool) -> None:
         print(f"matched pids: {', '.join(str(p) for p in result.killed)}")
     else:
         print("matched pids: none")
+    print_profile(result, dry_run=dry_run)
     if dry_run:
         print("dry-run: nothing killed, nothing launched")
         return
@@ -63,3 +65,19 @@ def print_result(result, *, dry_run: bool) -> None:
         print(f"launched: {result.exe}")
     else:
         print("launch skipped")
+
+
+def print_profile(result, *, dry_run: bool) -> None:
+    if not result.killed:
+        return
+    if not result.profile_dir:
+        print("profile: default (no --user-data-dir in use)")
+        return
+    verb = "would preserve" if dry_run else "preserving"
+    print(f"profile: {verb} --user-data-dir={result.profile_dir}")
+    if result.profile_conflict:
+        print(
+            "warning: more than one profile is running; only the one above "
+            "will be relaunched",
+            file=sys.stderr,
+        )

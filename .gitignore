@@ -7,3 +7,6 @@ dist/
 build/
 *.egg-info/
 SESSION.md
+debug.log
+*.log
+.claude/
