@@ -26,6 +26,8 @@ hrcc --profile-dir <dir>    # relaunch against a specific --user-data-dir
 hrcc --no-profile           # relaunch bare, discarding the profile in use
 hrcc --json                 # emit the result as JSON instead of prose
 hrcc --verify               # wait for the package, then confirm Desktop came back
+hrcc --progress-file <path> # publish what the restart is doing, as JSON
+hrcc --label <text>         # an opaque display string for that file
 ```
 
 The exe is discovered at run time via `Get-AppxPackage -Name 'Claude'`, so it follows Store updates. Override with `--exe` if discovery fails.
@@ -67,6 +69,42 @@ The child's fate decides one thing only - whether trying again is safe:
 - **The process survey stops answering**: `hrcc` refuses to guess, and stops.
 
 All three of those exit 5 with Desktop down, so a caller must read the exit code rather than assume a return means Desktop is back.
+
+### Publishing progress
+
+A hardened restart takes tens of seconds and can fail with nobody watching - the terminal that started it is usually inside the Desktop being killed. So `hrcc` **writes** what it is doing:
+
+```powershell
+hrcc --profile-dir D:\profiles\work --label work --progress-file $env:LOCALAPPDATA\myapp\restart-status.json
+```
+
+`hrcc` is a writer and never a UI owner. It does not draw anything, it does not spawn anything, and it has no opinion about who reads the file. `--label` is an **opaque display string** - it exists so the file can carry a human-meaningful name without `hrcc` learning what the caller thinks it is restarting for.
+
+Two files are written. The **state file** is a single slot, rewritten on every phase change, and is therefore evidence of the *current* phase and never of the run - a fast success is indistinguishable from a run where the package gate never fired. Beside it, `<name>.trace.jsonl` is an append-only line-per-phase record of this one run, truncated when the run starts. That is the one to read afterwards.
+
+The state file's shape:
+
+| Field | Meaning |
+| --- | --- |
+| `schemaVersion` | Bumped when this table changes. |
+| `phase` | One of `stopping`, `waiting-down`, `waiting-package`, `launching`, `waiting-up`, `done`, `failed`. |
+| `detail` | A short human-readable headline for the phase. |
+| `label` | Whatever `--label` was given, or `null`. |
+| `attempt`, `maxAttempts` | Which launch attempt is in flight, and the bound. Integers. |
+| `packageStatus` | What the package reported while `waiting-package`, else `null`. |
+| `error` | A short reason, on `failed` only. |
+| `pid` | The `hrcc` process writing the file. |
+| `startedAt`, `updatedAt` | RFC 3339 with an explicit UTC offset. |
+
+Notes for anyone writing a reader:
+
+- **Be lenient.** `hrcc` refuses to write an unknown phase, but a reader on a different release cadence should ignore fields it does not know and fall back to `detail` on a phase it does not recognise.
+- **The timestamps carry an offset on purpose.** A naive UTC string is read as *local* time by PowerShell's `[datetime]`, which puts every frame past any staleness cutoff.
+- **UTF-8, no BOM, integers stay integers.**
+- The file is written temp-then-renamed, falling back to a plain overwrite when the rename fails - which it does, permanently, under MSIX path virtualization. A reader may therefore see a torn file on rare occasions and should treat an unparseable read as a skipped frame rather than an error.
+- **Publishing never breaks the restart.** If the file cannot be written, `hrcc` carries on and warns.
+
+Without `--progress-file`, a verifying run publishes into `~/.hrcc/`. A bare `hrcc` publishes nothing, and neither does `--dry-run`, which changes nothing by definition.
 
 ### Exit codes
 

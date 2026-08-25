@@ -274,7 +274,11 @@ same chrome. Moving it here would orphan it from the only thing it coordinates
 with, and hand a zero-dependency CLI a WPF subsystem with no second consumer.
 
 hrcc therefore takes `--progress-file <path>` and defaults it to its **own**
-directory. Hardcoding a consumer's path would put that consumer's name in this
+directory - `~/.hrcc`, not `%LOCALAPPDATA%\hrcc`, because hrcc runs inside
+Desktop's MSIX package context where that path turned out to be a reparse point
+into the package container and state written there was invisible from outside it.
+The display string travels as `label`, never `account`: hrcc knows a directory
+and a caption, and nothing about who is logged in. Hardcoding a consumer's path would put that consumer's name in this
 tool's source, which is the same dependency inversion the profile design already
 refuses. `account-swap` passes its existing path, so its widget and its directory
 are untouched.

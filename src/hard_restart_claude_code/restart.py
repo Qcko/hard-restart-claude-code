@@ -7,8 +7,19 @@ import subprocess
 import time
 import winreg
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+from .progress import (
+    NO_PROGRESS,
+    PHASE_DONE,
+    PHASE_FAILED,
+    PHASE_LAUNCHING,
+    PHASE_STOPPING,
+    PHASE_WAITING_DOWN,
+    PHASE_WAITING_UP,
+    Progress,
+)
 
 PROCESS_IMAGE_NAME = "claude.exe"
 APPX_PACKAGE_NAME = "Claude"
@@ -478,6 +489,9 @@ class Effects:
     launcher: Callable[[Path, str | None], LaunchHandle | None] = launch
     sleeper: Callable[[float], None] = time.sleep
     clock: Callable[[], float] = time.monotonic
+    # A writer, never a UI owner. Publishing is a side effect of the restart in
+    # exactly the way killing and launching are, which is why it lives here.
+    progress: Progress = field(default_factory=lambda: NO_PROGRESS)
 
 
 DEFAULT_EFFECTS = Effects()
@@ -536,9 +550,11 @@ def hard_restart(
 ) -> Result:
     report = effects.finder()
     if gate.enabled and not report.readable:
-        raise RestartBlocked(
+        _fail(
+            effects,
+            "Cannot tell what is running",
             "cannot tell which Claude Desktop processes are running, so killing "
-            "and relaunching could leave two of them - refusing to act blind"
+            "and relaunching could leave two of them - refusing to act blind",
         )
     processes = list(report.processes)
     pids = [process.pid for process in processes]
@@ -554,6 +570,7 @@ def hard_restart(
             launched=False, package_status=dry_status
         )
     if pids:
+        effects.progress.publish(PHASE_STOPPING, "Stopping Claude Desktop")
         effects.killer(pids)
     if gate.enabled:
         # Unconditionally, even when nothing was killed: an empty snapshot can
@@ -609,18 +626,23 @@ def _launch_verified(
                 raise FileNotFoundError(f"Claude Desktop exe not found: {target}")
             effects.launcher(target, profile_dir)
             return LaunchOutcome(target, package_status, attempt)
-        verdict = _attempt(target, profile_dir, waits, effects)
+        verdict = _attempt(target, profile_dir, waits, effects, attempt)
         if verdict.up:
+            effects.progress.publish(
+                PHASE_DONE, "Claude Desktop is running", attempt=attempt
+            )
             return LaunchOutcome(target, package_status, attempt)
         reason = verdict.reason
         # THE rule of this slice: a child that is still alive means Desktop is
         # coming up slowly, not failing. Spawning again there is how one restart
         # becomes two Desktops on two data dirs.
         if not verdict.retryable:
-            raise RestartBlocked(verdict.reason, killed, attempt)
+            _fail(effects, verdict.headline, verdict.reason, killed, attempt)
         if attempt < attempts:
             effects.sleeper(_backoff_seconds(waits, attempt))
-    raise RestartBlocked(
+    _fail(
+        effects,
+        "Claude Desktop would not start",
         f"Claude Desktop would not start after {attempts} attempts: {reason}",
         killed,
         attempts,
@@ -632,21 +654,34 @@ def _launch_verified(
 # of the restart. Only the unhardened path, which has no second attempt to offer,
 # still turns it into an error.
 def _attempt(
-    exe: Path, profile_dir: str | None, waits: Waits, effects: Effects
+    exe: Path, profile_dir: str | None, waits: Waits, effects: Effects, attempt: int
 ) -> UpVerdict:
     if not exe.exists():
         return UpVerdict(
-            up=False, retryable=True, reason=f"Claude Desktop exe not found: {exe}"
+            up=False,
+            retryable=True,
+            headline="The Claude package is not available",
+            reason=f"Claude Desktop exe not found: {exe}",
         )
+    effects.progress.publish(
+        PHASE_LAUNCHING, "Starting Claude Desktop", attempt=attempt
+    )
     handle = effects.launcher(exe, profile_dir)
+    effects.progress.publish(
+        PHASE_WAITING_UP, "Waiting for Claude Desktop to appear", attempt=attempt
+    )
     return _await_desktop_up(handle, waits, effects)
 
 
+# The headline is what a person reads on the widget and the reason is what a
+# caller reads in the error. They are separate because the reason is free to name
+# a path and the headline never may - published strings stay path-free.
 @dataclass(frozen=True)
 class UpVerdict:
     up: bool
     retryable: bool = False
     reason: str = ""
+    headline: str = "Claude Desktop did not come back"
 
 
 DESKTOP_UP = UpVerdict(up=True)
@@ -672,6 +707,7 @@ def _await_desktop_up(
             # launches a second Desktop.
             return UpVerdict(
                 up=False,
+                headline="Lost sight of Claude Desktop",
                 reason=(
                     "lost sight of Claude Desktop while waiting for it to come "
                     "back - cannot tell whether it is up"
@@ -690,6 +726,7 @@ def _await_desktop_up(
         return _exited_verdict()
     return UpVerdict(
         up=False,
+        headline="Claude Desktop is not responding",
         reason="gave up waiting for Claude Desktop: it did not appear in time",
     )
 
@@ -716,8 +753,25 @@ def _exited_verdict() -> UpVerdict:
     return UpVerdict(
         up=False,
         retryable=True,
+        headline="Claude Desktop did not start",
         reason="the launched process exited without starting Claude Desktop",
     )
+
+
+# Publishing the failure and raising it are one act: every path that gives up
+# must leave the same evidence behind, and one that only raises leaves a widget
+# showing the last thing that went right.
+def _fail(
+    effects: Effects,
+    headline: str,
+    reason: str,
+    killed: Sequence[int] = (),
+    attempts: int = 0,
+) -> None:
+    effects.progress.publish(
+        PHASE_FAILED, headline, attempt=attempts, error=headline
+    )
+    raise RestartBlocked(reason, killed, attempts)
 
 
 # A launcher that reports nothing leaves the child's fate unknown, and unknown
@@ -737,11 +791,14 @@ def _child_alive(handle: LaunchHandle | None) -> bool:
 # blind sleep is REPLACED here rather than kept alongside: waiting twice would be
 # a second of latency plus the same hazard.
 def _settle(effects: Effects, waits: Waits, killed: Sequence[int]) -> None:
+    effects.progress.publish(PHASE_WAITING_DOWN, "Waiting for Claude Desktop to exit")
     deadline = effects.clock() + waits.down_timeout_seconds
     while True:
         report = effects.finder()
         if not report.readable:
-            raise RestartBlocked(
+            _fail(
+                effects,
+                "Lost sight of Claude Desktop",
                 "lost sight of Claude Desktop while waiting for it to exit - "
                 "cannot tell whether it is down",
                 killed,
@@ -749,7 +806,9 @@ def _settle(effects: Effects, waits: Waits, killed: Sequence[int]) -> None:
         if not report.processes:
             return
         if effects.clock() >= deadline:
-            raise RestartBlocked(
+            _fail(
+                effects,
+                "Claude Desktop would not stop",
                 "Claude Desktop was still running "
                 f"{waits.down_timeout_seconds:g}s after being killed",
                 killed,

@@ -5,12 +5,15 @@ import json
 import sys
 from pathlib import Path
 
+from .progress import PHASE_WAITING_PACKAGE, Progress, default_progress_file, open_progress
 from .restart import (
+    DEFAULT_WAITS,
     NO_GATE,
     PACKAGE_BUDGET_SECONDS,
     PACKAGE_STATUS_OK,
     PROFILE_SOURCE_EXPLICIT,
     PROFILE_SOURCE_NONE,
+    Effects,
     PackageGate,
     ProfileChoice,
     ProfileDirError,
@@ -48,13 +51,15 @@ def main(argv: list[str] | None = None) -> int:
     exe = args.exe or discover_exe()
     if exe is None:
         return fail(NO_EXE_MESSAGE, EXIT_NO_EXE, as_json=args.json)
+    progress = build_progress(args)
     try:
         result = hard_restart(
             exe,
             dry_run=args.dry_run,
             no_launch=args.no_launch,
             profile=profile,
-            gate=build_gate(args),
+            gate=build_gate(args, progress),
+            effects=Effects(progress=progress),
         )
     except RestartBlocked as err:
         # Desktop may already be down at this point, so report what was killed:
@@ -97,20 +102,53 @@ def resolve_profile_choice(args) -> ProfileChoice:
 # one-second kill-and-relaunch, because it is normally typed by a human from a
 # shell inside Desktop and a command that can block for minutes is a different
 # tool than the one they learned.
-def build_gate(args) -> PackageGate:
+def wants_verification(args) -> bool:
+    return bool(args.verify or args.profile_dir is not None or args.simulate_package_status)
+
+
+def build_gate(args, progress: Progress) -> PackageGate:
     simulate = args.simulate_package_status
-    if not (args.verify or args.profile_dir is not None or simulate):
+    if not wants_verification(args):
         return NO_GATE
     return PackageGate(
         enabled=True,
         budget_seconds=args.package_budget,
         reader=simulated_reader(simulate) if simulate else read_packages,
-        on_status=report_package_status,
+        on_status=lambda status: report_package_status(status, progress),
     )
 
 
-def report_package_status(status: str) -> None:
-    print(f"package: {status}", file=sys.stderr)
+# The gate owns the only phase hard_restart cannot publish for itself, because
+# the status being waited on is the gate's to report.
+def report_package_status(status: str, progress: Progress) -> None:
+    warn(f"package: {status}")
+    progress.publish(
+        PHASE_WAITING_PACKAGE, "Waiting for the Claude package", packageStatus=status
+    )
+
+
+# The default lives in hrcc's OWN directory. Hardcoding a consumer's path would
+# put that consumer's name in this tool's source, which is the dependency
+# inversion the profile design already refuses. A caller passes its own path.
+def build_progress(args) -> Progress:
+    file = args.progress_file
+    if args.dry_run:
+        # A dry run changes nothing, and a state file is a change.
+        file = None
+    elif file is None and wants_verification(args):
+        file = default_progress_file()
+    attempts = DEFAULT_WAITS.launch_attempts if wants_verification(args) else 1
+    return open_progress(file, label=args.label, max_attempts=attempts, log=warn)
+
+
+# hrcc is usually orphaned by the very kill it performs, so its stderr is a dead
+# pipe for most of a hardened run. A diagnostic must never be the thing that
+# takes the restart down.
+def warn(message: str) -> None:
+    try:
+        print(message, file=sys.stderr)
+    except OSError:
+        pass
 
 
 def fail(
@@ -158,12 +196,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_profile_flags(parser)
     add_verify_flags(parser)
+    add_progress_flags(parser)
     parser.add_argument(
         "--json",
         action="store_true",
         help="Emit the result as JSON. Prefer this to parsing the prose output.",
     )
     return parser
+
+
+# hrcc is a writer of progress and never a UI owner. --label is an opaque
+# display string precisely so this tool never learns what the caller thinks it
+# is restarting for; if anyone proposes --account, the boundary has leaked.
+def add_progress_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--progress-file",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Publish phase transitions here as JSON, with an append-only trace "
+            "beside it. Defaults to hrcc's own directory when verifying."
+        ),
+    )
+    parser.add_argument(
+        "--label",
+        default=None,
+        metavar="TEXT",
+        help="An opaque display string echoed into the progress file.",
+    )
 
 
 def add_verify_flags(parser: argparse.ArgumentParser) -> None:

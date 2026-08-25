@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from hard_restart_claude_code import restart as restart_module
+from hard_restart_claude_code.progress import NO_PROGRESS
 from hard_restart_claude_code.cli import build_gate, build_parser
 from hard_restart_claude_code.restart import (
     ClaudePackage,
@@ -92,7 +93,7 @@ class DyingDesktop:
 
 
 def _gate_for(argv: list[str]):
-    return build_gate(build_parser().parse_args(argv))
+    return build_gate(build_parser().parse_args(argv), NO_PROGRESS)
 
 
 # The headline rule: a bare hrcc stays a one-second command. Inverting this
