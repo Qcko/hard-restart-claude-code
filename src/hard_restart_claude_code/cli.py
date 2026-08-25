@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from .lock import RunLock, acquire_run_lock
+from .lock import RunLock, acquire_run_lock, not_taken
 from .progress import PHASE_WAITING_PACKAGE, Progress, default_progress_file, open_progress
 from .restart import (
     DEFAULT_WAITS,
@@ -72,10 +72,10 @@ def main(argv: list[str] | None = None) -> int:
 # one-second kill-and-relaunch that has never coordinated with anything, and
 # making it start refusing would change the one command this project promises
 # to leave alone.
-def take_run_lock(args) -> RunLock:
+def take_run_lock(args, acquirer=None) -> RunLock:
     if args.dry_run or not wants_verification(args):
-        return RunLock()
-    return acquire_run_lock()
+        return not_taken()
+    return (acquirer or acquire_run_lock)()
 
 
 def run_restart(args, exe, profile) -> int:
