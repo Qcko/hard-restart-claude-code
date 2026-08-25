@@ -217,7 +217,11 @@ def test_hard_restart_kills_then_launches_with_profile(tmp_path):
         sleeper=lambda _s: events.append(("sleep",)),
     )
     assert result == Result(
-        killed=[10, 11], launched=True, exe=exe, profile_dir=r"D:\reserve"
+        killed=[10, 11],
+        launched=True,
+        exe=exe,
+        profile_dir=r"D:\reserve",
+        launch_profile_dir=r"D:\reserve",
     )
     assert events == [
         ("kill", [10, 11]),
@@ -287,7 +291,11 @@ def test_hard_restart_no_launch_kills_only(tmp_path):
         sleeper=lambda _s: None,
     )
     assert result == Result(
-        killed=[7], launched=False, exe=exe, profile_dir=r"D:\reserve"
+        killed=[7],
+        launched=False,
+        exe=exe,
+        profile_dir=r"D:\reserve",
+        launch_profile_dir=r"D:\reserve",
     )
     assert events == [("kill", [7])]
 

@@ -36,6 +36,37 @@ class ClaudeProcess:
     profile_dir: str | None = None
 
 
+class ProfileDirError(ValueError):
+    pass
+
+
+PROFILE_SOURCE_EXPLICIT = "explicit"
+PROFILE_SOURCE_INFERRED = "inferred"
+PROFILE_SOURCE_NONE = "none"
+
+
+# Explicit beats inferred, and omitting the flag is NOT the same as asking for a
+# bare launch: a caller whose whole purpose is switching profiles must not
+# silently relaunch the one already running because a flag went missing. Carried
+# as one value object because hard_restart is already at the Rule of 7 limit.
+@dataclass(frozen=True)
+class ProfileChoice:
+    explicit: str | None = None
+    bare: bool = False
+
+    # The CLI's mutually-exclusive group blocks this, but hard_restart is a
+    # supported entry point, so an importing caller can build it directly. Both
+    # readers below would silently resolve it to bare and drop the dir.
+    def __post_init__(self) -> None:
+        if self.explicit and self.bare:
+            raise ProfileDirError(
+                "a profile choice is either an explicit dir or bare, not both"
+            )
+
+
+INFERRED = ProfileChoice()
+
+
 @dataclass(frozen=True)
 class Result:
     killed: list[int]
@@ -43,6 +74,8 @@ class Result:
     exe: Path
     profile_dir: str | None = None
     profile_conflict: bool = False
+    launch_profile_dir: str | None = None
+    profile_source: str = PROFILE_SOURCE_INFERRED
 
 
 def discover_exe(runner: Runner | None = None) -> Path | None:
@@ -187,6 +220,52 @@ def selected_profile_dir(processes: Sequence[ClaudeProcess]) -> str | None:
     return profiles[0] if profiles else None
 
 
+FORBIDDEN_PATH_CHARS = ("\x00", "\n", "\r")
+
+
+# This value is handed to Electron as a data dir, and a Claude data dir holds
+# live session credentials. A UNC path would put them on a remote share; a
+# device path sidesteps normal path handling; control characters have no
+# business in a directory name. Reject rather than sanitize - a caller that
+# passes nonsense should hear about it, not get a quietly different directory.
+def validate_profile_dir(value: str) -> str:
+    text = (value or "").strip()
+    if not text:
+        raise ProfileDirError("profile dir must not be empty")
+    if any(char in text for char in FORBIDDEN_PATH_CHARS):
+        raise ProfileDirError("profile dir must not contain NUL or newline characters")
+    if not Path(text).is_absolute():
+        raise ProfileDirError(f"profile dir must be an absolute path: {text}")
+    _reject_remote(text)
+    resolved = _resolve_or_reject(text)
+    # Checking only the input is not enough. resolve() normalises a
+    # forward-slash UNC path into the backslash form, and follows junctions, so
+    # a value that looked local on the way in can come back out pointing at a
+    # share. The resolved value is the one that gets launched, so it is the one
+    # that has to satisfy the rule.
+    _reject_remote(str(resolved))
+    if resolved.exists() and not resolved.is_dir():
+        raise ProfileDirError(f"profile dir is not a directory: {text}")
+    return str(resolved)
+
+
+REMOTE_PREFIXES = ("\\\\", "//")
+
+
+def _reject_remote(text: str) -> None:
+    if text.startswith(REMOTE_PREFIXES) or Path(text).drive.startswith(REMOTE_PREFIXES):
+        raise ProfileDirError(
+            f"profile dir must be a local path, not a UNC or device path: {text}"
+        )
+
+
+def _resolve_or_reject(text: str) -> Path:
+    try:
+        return Path(text).resolve()
+    except OSError as err:
+        raise ProfileDirError(f"profile dir is not a usable path: {text}") from err
+
+
 def kill_pids(pids: list[int], runner: Runner | None = None) -> None:
     runner = runner or _default_capture
     for pid in pids:
@@ -208,6 +287,7 @@ def hard_restart(
     dry_run: bool = False,
     no_launch: bool = False,
     settle_seconds: float = 1.0,
+    profile: ProfileChoice = INFERRED,
     finder: Callable[[], list[ClaudeProcess]] = find_processes,
     killer: Callable[[list[int]], None] = kill_pids,
     launcher: Callable[[Path, str | None], None] = launch,
@@ -216,7 +296,7 @@ def hard_restart(
     processes = finder()
     pids = [process.pid for process in processes]
     profiles = distinct_profile_dirs(processes)
-    outcome = _partial_result(exe, pids, profiles)
+    outcome = _partial_result(exe, pids, profiles, profile)
     if dry_run:
         return outcome(launched=False)
     if pids:
@@ -226,12 +306,28 @@ def hard_restart(
         return outcome(launched=False)
     if not exe.exists():
         raise FileNotFoundError(f"Claude Desktop exe not found: {exe}")
-    launcher(exe, profiles[0] if profiles else None)
+    launcher(exe, launch_profile_dir(profile, profiles))
     return outcome(launched=True)
 
 
+def launch_profile_dir(profile: ProfileChoice, observed: Sequence[str]) -> str | None:
+    if profile.bare:
+        return None
+    if profile.explicit:
+        return profile.explicit
+    return observed[0] if observed else None
+
+
+def profile_source(profile: ProfileChoice) -> str:
+    if profile.bare:
+        return PROFILE_SOURCE_NONE
+    if profile.explicit:
+        return PROFILE_SOURCE_EXPLICIT
+    return PROFILE_SOURCE_INFERRED
+
+
 def _partial_result(
-    exe: Path, pids: list[int], profiles: list[str]
+    exe: Path, pids: list[int], profiles: list[str], profile: ProfileChoice
 ) -> Callable[..., Result]:
     def build(*, launched: bool) -> Result:
         return Result(
@@ -240,6 +336,8 @@ def _partial_result(
             exe=exe,
             profile_dir=profiles[0] if profiles else None,
             profile_conflict=len(profiles) > 1,
+            launch_profile_dir=launch_profile_dir(profile, profiles),
+            profile_source=profile_source(profile),
         )
 
     return build

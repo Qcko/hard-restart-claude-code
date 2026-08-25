@@ -18,13 +18,41 @@ After install, the binary lives at `<UV_TOOL_BIN_DIR>\hard-restart-claude-code.e
 ## Usage
 
 ```powershell
-hrcc                  # kill all matching processes, relaunch
-hrcc --dry-run        # list what would be killed, change nothing
-hrcc --no-launch      # kill only, do not relaunch
-hrcc --exe <path>     # override the Claude Desktop exe path
+hrcc                        # kill all matching processes, relaunch
+hrcc --dry-run              # list what would be killed, change nothing
+hrcc --no-launch            # kill only, do not relaunch
+hrcc --exe <path>           # override the Claude Desktop exe path
+hrcc --profile-dir <dir>    # relaunch against a specific --user-data-dir
+hrcc --no-profile           # relaunch bare, discarding the profile in use
+hrcc --json                 # emit the result as JSON instead of prose
 ```
 
 The exe is discovered at run time via `Get-AppxPackage -Name 'Claude'`, so it follows Store updates. Override with `--exe` if discovery fails.
+
+### Choosing the profile
+
+By default `hrcc` relaunches against whatever `--user-data-dir` the running Desktop was using, so a restart keeps you on the same account.
+
+`--profile-dir` overrides that and always wins over what was observed. Every matching Desktop process is still killed, whatever profile it was on. The value is validated before use: it must be an absolute local path, must not be a UNC or device path, must not contain NUL or newline characters, and must not name an existing file. A value that fails validation is an error — `hrcc` never quietly falls back to the profile that was running, because that would relaunch Desktop on one account while the caller believes it asked for another.
+
+**Omitting `--profile-dir` is not the same as `--no-profile`.** Omitting it preserves the current profile; `--no-profile` discards it deliberately. A caller that means "launch bare" must say so, so that a dropped flag can never look like a successful switch.
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Success. |
+| 2 | Could not resolve a single Claude Desktop install, or `--exe` does not exist. Also argparse usage errors. |
+| 3 | `--profile-dir` failed validation. |
+| 4 | Contradictory flags (`--profile-dir` with `--no-launch`). |
+
+### Stable interface
+
+These are the parts other tools may depend on. Anything else is an implementation detail and may change without notice.
+
+- The flag names above, and the exit-code table.
+- `--json`, whose keys are `killed`, `launched`, `exe`, `dry_run`, `observed_profile`, `observed_profile_conflict`, `launch_profile_dir`, `profile_source`. On a handled error it emits `error` and `exit_code` instead. **Prefer `--json` to parsing the prose output** — the human-readable lines are free to change wording. One gap to code for: a *usage* error (an unknown flag, or `--profile-dir` together with `--no-profile`) is rejected by the argument parser before `--json` is considered, so it exits 2 with a usage message on stderr and **no JSON on stdout**. Treat empty stdout as a usage error and read stderr.
+- `main` as an importable entry point (`from hard_restart_claude_code import main`), which is how a non-Python caller drives it through this package's interpreter.
 
 ## How it matches processes
 
