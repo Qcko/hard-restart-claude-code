@@ -43,6 +43,24 @@ class ClaudeProcess:
     profile_dir: str | None = None
 
 
+# "Nothing is running" and "the query could not answer" must never be the same
+# value. Relaunching on the second is how a restart ends up with two Desktops on
+# two data dirs, so the hardened path refuses to act while blind.
+@dataclass(frozen=True)
+class ProcessReport:
+    readable: bool
+    processes: tuple[ClaudeProcess, ...] = ()
+
+
+# `killed` is the difference between "nothing happened, safe to retry" and
+# "Desktop is down and did not come back", which a caller cannot otherwise tell
+# from the exit code alone.
+class RestartBlocked(RuntimeError):
+    def __init__(self, message: str, killed: Sequence[int] = ()) -> None:
+        super().__init__(message)
+        self.killed = list(killed)
+
+
 class ProfileDirError(ValueError):
     pass
 
@@ -187,26 +205,37 @@ def _distinct_install_locations(stdout: str) -> list[str]:
     return unique
 
 
-def find_processes(
+def survey_processes(
     runner: Runner | None = None, install_prefix: str | None = None
-) -> list[ClaudeProcess]:
+) -> ProcessReport:
     runner = runner or _default_capture
     cmd = _powershell(
         f"ConvertTo-Json -Depth 3 -InputObject @(Get-CimInstance Win32_Process "
         f"-Filter \"Name='{PROCESS_IMAGE_NAME}'\" -ErrorAction SilentlyContinue | "
         f"Select-Object ProcessId,ExecutablePath,CommandLine)"
     )
-    processes = _decode_processes(runner(cmd).stdout)
-    return [
+    try:
+        completed = runner(cmd)
+    except Exception:
+        return ProcessReport(readable=False)
+    if completed.returncode != 0:
+        return ProcessReport(readable=False)
+    rows = _decode_rows_or_none(completed.stdout)
+    if rows is None:
+        return ProcessReport(readable=False)
+    matched = [
         process
-        for process in processes
+        for process in _processes_from_rows(rows)
         if is_package_install_path(process.path, install_prefix)
     ]
+    return ProcessReport(readable=True, processes=tuple(matched))
 
 
-def _decode_processes(stdout: str) -> list[ClaudeProcess]:
+
+
+def _processes_from_rows(rows: Sequence[dict]) -> list[ClaudeProcess]:
     processes = []
-    for row in _decode_rows(stdout):
+    for row in rows:
         pid = row.get("ProcessId")
         if not isinstance(pid, int):
             continue
@@ -258,19 +287,26 @@ def _normalized(path: str) -> str:
     return os.path.normpath(path).casefold()
 
 
-def _decode_rows(stdout: str) -> list[dict]:
+# None means "could not be understood", which is not the same as an empty list.
+# A working query always emits at least "[]", so blank output is a broken reader
+# rather than an idle machine.
+def _decode_rows_or_none(stdout: str) -> list[dict] | None:
     text = stdout.strip()
     if not text:
-        return []
+        return None
     try:
         decoded = json.loads(text)
     except ValueError:
-        return []
+        return None
     if isinstance(decoded, dict):
         return [decoded]
     if not isinstance(decoded, list):
-        return []
+        return None
     return [row for row in decoded if isinstance(row, dict)]
+
+
+def _decode_rows(stdout: str) -> list[dict]:
+    return _decode_rows_or_none(stdout) or []
 
 
 _PROFILE_PATTERN = re.compile(
@@ -418,13 +454,36 @@ def launch(
 # check one more thing.
 @dataclass(frozen=True)
 class Effects:
-    finder: Callable[[], list[ClaudeProcess]] = find_processes
+    finder: Callable[[], ProcessReport] = survey_processes
     killer: Callable[[list[int]], None] = kill_pids
     launcher: Callable[[Path, str | None], None] = launch
     sleeper: Callable[[float], None] = time.sleep
+    clock: Callable[[], float] = time.monotonic
 
 
 DEFAULT_EFFECTS = Effects()
+
+
+# Grouped for the same reason as Effects, and because settle_seconds and the
+# down-confirmation deadline are alternatives rather than companions: the
+# hardened path replaces the blind sleep, it does not wait twice.
+@dataclass(frozen=True)
+class Waits:
+    settle_seconds: float = 1.0
+    down_timeout_seconds: float = 15.0
+    down_poll_seconds: float = 0.3
+
+    # Same hazard as PackageGate's poll: a zero interval hammers the reader for
+    # the whole timeout, and against a clock that only advances on sleep it never
+    # terminates.
+    def __post_init__(self) -> None:
+        if self.down_poll_seconds <= 0:
+            raise ValueError("down-confirmation poll interval must be above zero")
+        if self.down_timeout_seconds < 0:
+            raise ValueError("down-confirmation timeout must not be negative")
+
+
+DEFAULT_WAITS = Waits()
 
 
 def hard_restart(
@@ -432,12 +491,18 @@ def hard_restart(
     *,
     dry_run: bool = False,
     no_launch: bool = False,
-    settle_seconds: float = 1.0,
+    waits: Waits = DEFAULT_WAITS,
     profile: ProfileChoice = INFERRED,
     gate: PackageGate = NO_GATE,
     effects: Effects = DEFAULT_EFFECTS,
 ) -> Result:
-    processes = effects.finder()
+    report = effects.finder()
+    if gate.enabled and not report.readable:
+        raise RestartBlocked(
+            "cannot tell which Claude Desktop processes are running, so killing "
+            "and relaunching could leave two of them - refusing to act blind"
+        )
+    processes = list(report.processes)
     pids = [process.pid for process in processes]
     profiles = distinct_profile_dirs(processes)
     outcome = _partial_result(exe, pids, profiles, profile)
@@ -452,7 +517,13 @@ def hard_restart(
         )
     if pids:
         effects.killer(pids)
-        effects.sleeper(settle_seconds)
+    if gate.enabled:
+        # Unconditionally, even when nothing was killed: an empty snapshot can
+        # also mean a Desktop that was mid-launch when we looked, and relaunching
+        # over that is the same two-Desktops outcome.
+        _settle(effects, waits, pids)
+    elif pids:
+        effects.sleeper(waits.settle_seconds)
     if no_launch:
         return outcome(launched=False)
     # Resolve the exe AFTER the kill, not before: an update that lands while
@@ -466,6 +537,31 @@ def hard_restart(
     return _partial_result(exe, pids, profiles, profile)(
         launched=True, package_status=package_status
     )
+
+
+# taskkill returning is not termination, and the pid list was a snapshot taken
+# before the kill, so a process that appears during it is invisible to it. The
+# blind sleep is REPLACED here rather than kept alongside: waiting twice would be
+# a second of latency plus the same hazard.
+def _settle(effects: Effects, waits: Waits, killed: Sequence[int]) -> None:
+    deadline = effects.clock() + waits.down_timeout_seconds
+    while True:
+        report = effects.finder()
+        if not report.readable:
+            raise RestartBlocked(
+                "lost sight of Claude Desktop while waiting for it to exit - "
+                "cannot tell whether it is down",
+                killed,
+            )
+        if not report.processes:
+            return
+        if effects.clock() >= deadline:
+            raise RestartBlocked(
+                "Claude Desktop was still running "
+                f"{waits.down_timeout_seconds:g}s after being killed",
+                killed,
+            )
+        effects.sleeper(waits.down_poll_seconds)
 
 
 def await_package_ready(gate: PackageGate) -> tuple[Path | None, str | None]:

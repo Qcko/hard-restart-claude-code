@@ -200,6 +200,17 @@ returning is not termination, and the pid list is a snapshot taken before the
 kill, so a process that appears during it is invisible. The hardened path
 re-runs the finder against a deadline until the matched set is empty.
 
+The confirmation runs even when the initial snapshot was empty. The stated
+hazard is a process the snapshot could not see, and that cuts both ways: a
+Desktop still starting up when we looked is invisible to it too, and
+launching over that produces the same two Desktops. Confirming an empty
+snapshot costs one poll that returns immediately.
+
+Refusing after the kill leaves Desktop down, which is a different situation
+for a caller than refusing before it. The refusal therefore carries the pids
+it already killed, and the CLI reports them, so "nothing happened, safe to
+retry" stays distinguishable from "Desktop is down and did not come back".
+
 The reader must distinguish "no Desktop processes" from "the query failed", and
 **refuse to launch on the second**. Relaunching while blind is how two Desktops
 happen. `_decode_rows` currently collapses both to an empty list, and a test

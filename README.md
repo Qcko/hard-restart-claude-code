@@ -62,6 +62,7 @@ hrcc --dry-run --simulate-package-status Disabled --package-budget 4
 | 2 | Could not resolve a single Claude Desktop install, or `--exe` does not exist. Also argparse usage errors. |
 | 3 | `--profile-dir` failed validation. |
 | 4 | Contradictory flags (`--profile-dir` with `--no-launch`). |
+| 5 | Could not confirm what was running, or Desktop would not go down. Nothing was relaunched; Desktop may already be stopped. |
 
 ### Stable interface
 

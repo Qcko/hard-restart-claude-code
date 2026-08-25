@@ -14,6 +14,7 @@ from .restart import (
     PackageGate,
     ProfileChoice,
     ProfileDirError,
+    RestartBlocked,
     discover_exe,
     hard_restart,
     read_packages,
@@ -25,6 +26,7 @@ EXIT_OK = 0
 EXIT_NO_EXE = 2
 EXIT_BAD_PROFILE_DIR = 3
 EXIT_CONTRADICTORY_FLAGS = 4
+EXIT_CANNOT_CONFIRM = 5
 
 NO_EXE_MESSAGE = (
     "error: could not resolve a single Claude Desktop install - either none was "
@@ -53,6 +55,16 @@ def main(argv: list[str] | None = None) -> int:
             no_launch=args.no_launch,
             profile=profile,
             gate=build_gate(args),
+        )
+    except RestartBlocked as err:
+        # Desktop may already be down at this point, so report what was killed:
+        # "nothing happened, safe to retry" and "Desktop is down and did not come
+        # back" are very different situations to be handed one exit code for.
+        return fail(
+            f"error: {err}",
+            EXIT_CANNOT_CONFIRM,
+            as_json=args.json,
+            killed=err.killed,
         )
     except FileNotFoundError as err:
         return fail(f"error: {err}", EXIT_NO_EXE, as_json=args.json)
@@ -100,10 +112,13 @@ def report_package_status(status: str) -> None:
     print(f"package: {status}", file=sys.stderr)
 
 
-def fail(message: str, code: int, *, as_json: bool) -> int:
+def fail(message: str, code: int, *, as_json: bool, killed: list[int] | None = None) -> int:
     print(message, file=sys.stderr)
+    if killed:
+        print(f"killed before stopping: {', '.join(str(p) for p in killed)}", file=sys.stderr)
     if as_json:
-        print(json.dumps({"error": message, "exit_code": code}, indent=2))
+        payload = {"error": message, "exit_code": code, "killed": killed or []}
+        print(json.dumps(payload, indent=2))
     return code
 
 

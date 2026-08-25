@@ -17,6 +17,7 @@ from hard_restart_claude_code.restart import (
     PACKAGE_STATUS_UNREADABLE,
     PackageGate,
     PackageReport,
+    ProcessReport,
     await_package_ready,
     hard_restart,
     package_status_summary,
@@ -65,6 +66,19 @@ def _trust_tmp_path(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         restart_module, "package_install_prefix", lambda: str(tmp_path) + "\\"
     )
+
+
+class DyingDesktop:
+    """A finder that reports one process until the killer runs, as a real one does."""
+
+    def __init__(self) -> None:
+        self.alive = True
+
+    def find(self) -> ProcessReport:
+        return ProcessReport(True, [ClaudeProcess(pid=1)] if self.alive else [])
+
+    def kill(self, _pids) -> None:
+        self.alive = False
 
 
 def _gate_for(argv: list[str]):
@@ -224,15 +238,17 @@ def test_restart_still_launches_when_the_gate_gives_up(tmp_path):
     exe = tmp_path / "claude.exe"
     exe.write_text("")
     clock = FakeClock()
+    desktop = DyingDesktop()
     launched = []
     result = hard_restart(
         exe,
         gate=_gate(lambda: PackageReport(readable=False), clock),
         effects=Effects(
-            finder=lambda: [ClaudeProcess(pid=1)],
-            killer=lambda _pids: None,
+            finder=desktop.find,
+            killer=desktop.kill,
             launcher=lambda e, _dir: launched.append(e),
             sleeper=lambda _s: None,
+            clock=clock,
         ),
     )
     assert launched == [exe]
@@ -246,15 +262,17 @@ def test_restart_launches_the_exe_the_gate_chose(monkeypatch, tmp_path):
     stale = tmp_path / "stale-claude.exe"
     stale.write_text("")
     clock = FakeClock()
+    desktop = DyingDesktop()
     launched: list[Path] = []
     result = hard_restart(
         stale,
         gate=_gate(lambda: PackageReport(True, (package,)), clock),
         effects=Effects(
-            finder=lambda: [ClaudeProcess(pid=1)],
-            killer=lambda _pids: None,
+            finder=desktop.find,
+            killer=desktop.kill,
             launcher=lambda e, _dir: launched.append(e),
             sleeper=lambda _s: None,
+            clock=clock,
         ),
     )
     assert launched == [package.exe]

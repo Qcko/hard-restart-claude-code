@@ -9,10 +9,11 @@ from hard_restart_claude_code.restart import (
     ClaudeProcess,
     CompletedLike,
     Effects,
+    ProcessReport,
     Result,
     discover_exe,
     distinct_profile_dirs,
-    find_processes,
+    survey_processes,
     hard_restart,
     is_package_install_path,
     kill_pids,
@@ -29,6 +30,12 @@ RESERVE_CLI_PATH = (
     # per-machine, so the test uses a placeholder rather than a real one.
     r"D:\profiles\reserve\claude-code\2.1.229\claude.exe"
 )
+
+
+def found(runner):
+    report = survey_processes(runner)
+    assert report.readable, "expected a readable survey in this test"
+    return list(report.processes)
 
 
 def _rows(*rows) -> str:
@@ -50,7 +57,7 @@ def test_find_processes_parses_json_rows():
         captured["cmd"] = cmd
         return CompletedLike(stdout=_rows(_desktop_row(1234), _desktop_row(5678)))
 
-    processes = find_processes(runner)
+    processes = found(runner)
     assert [p.pid for p in processes] == [1234, 5678]
     assert captured["cmd"][0] == "powershell"
     joined = " ".join(captured["cmd"])
@@ -60,29 +67,32 @@ def test_find_processes_parses_json_rows():
 
 def test_find_processes_returns_empty_for_empty_array():
     runner = lambda _cmd: CompletedLike(stdout="[]")
-    assert find_processes(runner) == []
+    assert found(runner) == []
 
 
-def test_find_processes_returns_empty_for_blank_output():
-    runner = lambda _cmd: CompletedLike(stdout="   \n")
-    assert find_processes(runner) == []
+def test_blank_output_is_no_answer_not_an_empty_machine():
+    # The query always emits at least "[]", so blank means the reader broke.
+    # Reporting it as "nothing running" is what would relaunch over a live
+    # Desktop, so it must stay distinguishable.
+    runner = lambda _cmd: CompletedLike(stdout="   ")
+    assert survey_processes(runner).readable is False
 
 
 def test_find_processes_accepts_single_object_not_array():
     runner = lambda _cmd: CompletedLike(stdout=json.dumps(_desktop_row(99)))
-    assert [p.pid for p in find_processes(runner)] == [99]
+    assert [p.pid for p in found(runner)] == [99]
 
 
 def test_find_processes_ignores_rows_without_integer_pid():
     runner = lambda _cmd: CompletedLike(
         stdout=_rows({"ProcessId": None, "ExecutablePath": DESKTOP_PATH}, _desktop_row(7))
     )
-    assert [p.pid for p in find_processes(runner)] == [7]
+    assert [p.pid for p in found(runner)] == [7]
 
 
-def test_find_processes_survives_non_json_output():
-    runner = lambda _cmd: CompletedLike(stdout="Get-CimInstance : access denied")
-    assert find_processes(runner) == []
+def test_unparseable_output_is_no_answer():
+    runner = lambda _cmd: CompletedLike(stdout="not json at all")
+    assert survey_processes(runner).readable is False
 
 
 def test_lookalike_windowsapps_path_is_not_matched():
@@ -97,12 +107,12 @@ def test_lookalike_windowsapps_path_is_not_matched():
     runner = lambda _cmd: CompletedLike(
         stdout=_rows({"ProcessId": 5, "ExecutablePath": planted, "CommandLine": ""})
     )
-    assert find_processes(runner) == []
+    assert found(runner) == []
 
 
 def test_real_package_path_is_matched():
     runner = lambda _cmd: CompletedLike(stdout=_rows(_desktop_row(11)))
-    assert [process.pid for process in find_processes(runner)] == [11]
+    assert [process.pid for process in found(runner)] == [11]
 
 
 def test_install_path_match_is_case_insensitive():
@@ -142,7 +152,7 @@ def test_reserve_account_swap_cli_is_never_matched():
             {"ProcessId": 3, "ExecutablePath": RESERVE_CLI_PATH, "CommandLine": ""}
         )
     )
-    assert find_processes(runner) == []
+    assert found(runner) == []
 
 
 def test_query_does_not_widen_to_bare_claude_wildcard():
@@ -152,7 +162,7 @@ def test_query_does_not_widen_to_bare_claude_wildcard():
         captured["cmd"] = cmd
         return CompletedLike(stdout="[]")
 
-    find_processes(runner)
+    found(runner)
     assert "*Claude*" not in " ".join(captured["cmd"])
 
 
@@ -180,7 +190,7 @@ def test_parse_profile_dir_returns_none_for_empty_command_line():
 def test_find_processes_extracts_profile_from_command_line():
     row = _desktop_row(11, f'"{DESKTOP_PATH}" --user-data-dir=D:\\profiles\\reserve')
     runner = lambda _cmd: CompletedLike(stdout=_rows(row))
-    assert find_processes(runner)[0].profile_dir == r"D:\profiles\reserve"
+    assert found(runner)[0].profile_dir == r"D:\profiles\reserve"
 
 
 def test_selected_profile_dir_takes_the_first_profile_in_order():
@@ -210,10 +220,10 @@ def test_hard_restart_kills_then_launches_with_profile(tmp_path):
     result = hard_restart(
         exe,
         effects=Effects(
-            finder=lambda: [
+            finder=lambda: ProcessReport(True, [
                 ClaudeProcess(pid=10),
                 ClaudeProcess(pid=11, profile_dir=r"D:\reserve"),
-            ],
+            ]),
             killer=lambda pids: events.append(("kill", pids)),
             launcher=lambda e, profile: events.append(("launch", e, profile)),
             sleeper=lambda _s: events.append(("sleep",)),
@@ -241,7 +251,7 @@ def test_hard_restart_launches_bare_when_no_profile_in_use(tmp_path):
     hard_restart(
         exe,
         effects=Effects(
-            finder=lambda: [ClaudeProcess(pid=10)],
+            finder=lambda: ProcessReport(True, [ClaudeProcess(pid=10)]),
             killer=lambda _pids: None,
             launcher=lambda e, profile: events.append(("launch", e, profile)),
             sleeper=lambda _s: None,
@@ -258,7 +268,7 @@ def test_hard_restart_skips_kill_when_no_pids(tmp_path):
     hard_restart(
         exe,
         effects=Effects(
-            finder=lambda: [],
+            finder=lambda: ProcessReport(True, []),
             killer=lambda pids: events.append(("kill", pids)),
             launcher=lambda e, profile: events.append(("launch", e, profile)),
             sleeper=lambda _s: events.append(("sleep",)),
@@ -275,7 +285,7 @@ def test_hard_restart_dry_run_reports_profile_without_acting(tmp_path):
         exe,
         dry_run=True,
         effects=Effects(
-            finder=lambda: [ClaudeProcess(pid=99, profile_dir=r"D:\reserve")],
+            finder=lambda: ProcessReport(True, [ClaudeProcess(pid=99, profile_dir=r"D:\reserve")]),
             killer=lambda _pids: events.append("kill"),
             launcher=lambda _e, _p: events.append("launch"),
             sleeper=lambda _s: events.append("sleep"),
@@ -295,7 +305,7 @@ def test_hard_restart_no_launch_kills_only(tmp_path):
         exe,
         no_launch=True,
         effects=Effects(
-            finder=lambda: [ClaudeProcess(pid=7, profile_dir=r"D:\reserve")],
+            finder=lambda: ProcessReport(True, [ClaudeProcess(pid=7, profile_dir=r"D:\reserve")]),
             killer=lambda pids: events.append(("kill", pids)),
             launcher=lambda _e, _p: events.append("launch"),
             sleeper=lambda _s: None,
@@ -317,7 +327,7 @@ def test_hard_restart_missing_exe_raises(tmp_path):
         hard_restart(
             missing,
             effects=Effects(
-                finder=lambda: [],
+                finder=lambda: ProcessReport(True, []),
                 killer=lambda _pids: None,
                 launcher=lambda _e, _p: None,
                 sleeper=lambda _s: None,
@@ -384,7 +394,7 @@ def test_find_processes_are_sorted_by_pid():
     runner = lambda _cmd: CompletedLike(
         stdout=_rows(_desktop_row(900), _desktop_row(12), _desktop_row(400))
     )
-    assert [p.pid for p in find_processes(runner)] == [12, 400, 900]
+    assert [p.pid for p in found(runner)] == [12, 400, 900]
 
 
 def test_match_uses_executable_path_not_command_line():
@@ -399,7 +409,7 @@ def test_match_uses_executable_path_not_command_line():
             }
         )
     )
-    assert find_processes(runner) == []
+    assert found(runner) == []
 
 
 def test_distinct_profile_dirs_dedupes_and_keeps_order():
@@ -428,10 +438,10 @@ def test_hard_restart_flags_conflict_when_two_profiles_run(tmp_path):
     result = hard_restart(
         exe,
         effects=Effects(
-            finder=lambda: [
+            finder=lambda: ProcessReport(True, [
                 ClaudeProcess(pid=1, profile_dir=r"D:\reserve"),
                 ClaudeProcess(pid=2, profile_dir=r"D:\other"),
-            ],
+            ]),
             killer=lambda _pids: None,
             launcher=lambda e, profile: launched.append(profile),
             sleeper=lambda _s: None,
@@ -449,10 +459,10 @@ def test_hard_restart_reports_no_conflict_for_single_profile(tmp_path):
     result = hard_restart(
         exe,
         effects=Effects(
-            finder=lambda: [
+            finder=lambda: ProcessReport(True, [
                 ClaudeProcess(pid=1, profile_dir=r"D:\reserve"),
                 ClaudeProcess(pid=2, profile_dir=r"D:\reserve"),
-            ],
+            ]),
             killer=lambda _pids: None,
             launcher=lambda _e, _p: None,
             sleeper=lambda _s: None,
@@ -470,6 +480,6 @@ def test_profile_is_found_on_a_child_when_main_process_lacks_the_flag():
         200, rf'"{DESKTOP_PATH}" --type=renderer --user-data-dir=D:\profiles\reserve'
     )
     runner = lambda _cmd: CompletedLike(stdout=_rows(main, renderer))
-    processes = find_processes(runner)
+    processes = found(runner)
     assert processes[0].profile_dir is None
     assert selected_profile_dir(processes) == r"D:\profiles\reserve"

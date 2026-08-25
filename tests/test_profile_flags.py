@@ -20,6 +20,7 @@ from hard_restart_claude_code.restart import (
     PROFILE_SOURCE_EXPLICIT,
     PROFILE_SOURCE_INFERRED,
     PROFILE_SOURCE_NONE,
+    ProcessReport,
     ProfileChoice,
     ProfileDirError,
     Result,
@@ -102,7 +103,7 @@ def _restart(profile: ProfileChoice, tmp_path, observed: str | None = OBSERVED_D
         exe,
         profile=profile,
         effects=Effects(
-            finder=lambda: [ClaudeProcess(pid=1, profile_dir=observed)],
+            finder=lambda: ProcessReport(True, [ClaudeProcess(pid=1, profile_dir=observed)]),
             killer=lambda _pids: None,
             launcher=lambda _e, dir_: launched.append(dir_),
             sleeper=lambda _s: None,
@@ -180,7 +181,7 @@ def test_library_allows_no_launch_with_an_explicit_dir(tmp_path):
         no_launch=True,
         profile=ProfileChoice(explicit=EXPLICIT_DIR),
         effects=Effects(
-            finder=lambda: [ClaudeProcess(pid=1, profile_dir=OBSERVED_DIR)],
+            finder=lambda: ProcessReport(True, [ClaudeProcess(pid=1, profile_dir=OBSERVED_DIR)]),
             killer=lambda _pids: None,
             launcher=lambda _e, dir_: launched.append(dir_),
             sleeper=lambda _s: None,
