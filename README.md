@@ -28,7 +28,9 @@ The exe is discovered at run time via `Get-AppxPackage -Name 'Claude'`, so it fo
 
 ## How it matches processes
 
-Lists `claude.exe` processes via `Get-CimInstance Win32_Process` and keeps only those whose `ExecutablePath` contains `WindowsApps\Claude_`. This avoids killing unrelated `claude` binaries (e.g. the Claude Code CLI or its node host) — the path anchor is deliberately narrow, and a test asserts it never widens.
+Lists `claude.exe` processes via `Get-CimInstance Win32_Process`, then keeps only those whose `ExecutablePath` starts with `%ProgramFiles%\WindowsApps\Claude_`. This avoids killing unrelated `claude` binaries (e.g. the Claude Code CLI or its node host) - the path anchor is deliberately narrow, and tests assert both that it never widens and that a lookalike outside `%ProgramFiles%` is rejected.
+
+The anchor is a **prefix** test, not a substring test, and the decision is made in Python rather than in the PowerShell query. `%ProgramFiles%\WindowsApps` is admin-only, which is what makes a matched process trustworthy enough to kill and to read a `--user-data-dir` back from.
 
 Processes are killed individually (`taskkill /F /PID`), not as a tree. `hrcc` is usually run from a shell inside Claude Desktop, so a tree kill would terminate `hrcc` itself before it could relaunch anything.
 

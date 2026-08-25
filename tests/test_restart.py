@@ -13,15 +13,15 @@ from hard_restart_claude_code.restart import (
     distinct_profile_dirs,
     find_processes,
     hard_restart,
+    is_package_install_path,
     kill_pids,
+    package_install_prefix,
     parse_profile_dir,
     selected_profile_dir,
 )
 
-DESKTOP_PATH = (
-    r"C:\Program Files\WindowsApps"
-    r"\Claude_1.32352.1.0_x64__pzs8sxrjxfjjc\app\claude.exe"
-)
+INSTALL_PREFIX = package_install_prefix()
+DESKTOP_PATH = INSTALL_PREFIX + r"1.32352.1.0_x64__pzs8sxrjxfjjc\app\claude.exe"
 RESERVE_CLI_PATH = (
     r"E:\dev\secrets\account-swap\userdata\reserve\claude-code\2.1.229\claude.exe"
 )
@@ -81,20 +81,67 @@ def test_find_processes_survives_non_json_output():
     assert find_processes(runner) == []
 
 
-def test_query_filters_to_windowsapps_install_path():
-    captured = {}
+def test_lookalike_windowsapps_path_is_not_matched():
+    # The vulnerability this replaced: a substring match accepted any path
+    # CONTAINING WindowsApps\Claude_, including one the user can create for
+    # themselves. A matched process has its --user-data-dir read back and handed
+    # to the relaunch, so accepting a planted process hands over the data dir.
+    planted = (
+        r"C:\Users\someone\WindowsApps"
+        r"\Claude_9.9.9.9_x64__pzs8sxrjxfjjc\app\claude.exe"
+    )
+    runner = lambda _cmd: CompletedLike(
+        stdout=_rows({"ProcessId": 5, "ExecutablePath": planted, "CommandLine": ""})
+    )
+    assert find_processes(runner) == []
 
-    def runner(cmd):
-        captured["cmd"] = cmd
-        return CompletedLike(stdout="[]")
 
-    find_processes(runner)
-    assert r"WindowsApps\Claude_" in " ".join(captured["cmd"])
+def test_real_package_path_is_matched():
+    runner = lambda _cmd: CompletedLike(stdout=_rows(_desktop_row(11)))
+    assert [process.pid for process in find_processes(runner)] == [11]
+
+
+def test_install_path_match_is_case_insensitive():
+    assert is_package_install_path(DESKTOP_PATH.upper())
+    assert is_package_install_path(DESKTOP_PATH.lower())
+
+
+def test_install_path_match_rejects_empty_executable_path():
+    assert not is_package_install_path("")
+
+
+def test_install_prefix_accepts_explicit_program_files():
+    prefix = package_install_prefix(r"D:\Apps")
+    assert prefix == r"D:\Apps\WindowsApps\Claude_"
+    assert is_package_install_path(
+        r"D:\Apps\WindowsApps\Claude_1\app\claude.exe", prefix
+    )
+
+
+def test_install_prefix_ignores_the_program_files_environment(monkeypatch):
+    # The threat model is a process running as this user, and that process
+    # chooses the environment hrcc is launched with. If the anchor followed
+    # ProgramFiles it could be pointed at a directory the attacker owns, which
+    # is the whole thing this matcher exists to prevent.
+    monkeypatch.setenv("ProgramFiles", r"C:\Users\someone\evil")
+    assert package_install_prefix() == INSTALL_PREFIX
+    assert not is_package_install_path(
+        r"C:\Users\someone\evil\WindowsApps\Claude_1\app\claude.exe"
+    )
 
 
 def test_reserve_account_swap_cli_is_never_matched():
     # The account-swap managed CLI shares the claude.exe basename. It must stay
-    # outside the match, and it is the PowerShell path filter that excludes it.
+    # outside the match - now decided in Python, not by the PowerShell query.
+    runner = lambda _cmd: CompletedLike(
+        stdout=_rows(
+            {"ProcessId": 3, "ExecutablePath": RESERVE_CLI_PATH, "CommandLine": ""}
+        )
+    )
+    assert find_processes(runner) == []
+
+
+def test_query_does_not_widen_to_bare_claude_wildcard():
     captured = {}
 
     def runner(cmd):
@@ -102,10 +149,7 @@ def test_reserve_account_swap_cli_is_never_matched():
         return CompletedLike(stdout="[]")
 
     find_processes(runner)
-    query = " ".join(captured["cmd"])
-    assert RESERVE_CLI_PATH.lower() not in query.lower()
-    assert "*Claude*" not in query
-    assert r"*WindowsApps\Claude_*" in query
+    assert "*Claude*" not in " ".join(captured["cmd"])
 
 
 def test_parse_profile_dir_handles_equals_form():
@@ -319,15 +363,19 @@ def test_find_processes_are_sorted_by_pid():
     assert [p.pid for p in find_processes(runner)] == [12, 400, 900]
 
 
-def test_query_filters_on_executable_path_not_command_line():
-    captured = {}
-
-    def runner(cmd):
-        captured["cmd"] = cmd
-        return CompletedLike(stdout="[]")
-
-    find_processes(runner)
-    assert "$_.ExecutablePath -like" in " ".join(captured["cmd"])
+def test_match_uses_executable_path_not_command_line():
+    # A process running from elsewhere cannot buy itself a match by naming the
+    # real install path somewhere on its command line.
+    runner = lambda _cmd: CompletedLike(
+        stdout=_rows(
+            {
+                "ProcessId": 8,
+                "ExecutablePath": RESERVE_CLI_PATH,
+                "CommandLine": f'"{DESKTOP_PATH}"',
+            }
+        )
+    )
+    assert find_processes(runner) == []
 
 
 def test_distinct_profile_dirs_dedupes_and_keeps_order():

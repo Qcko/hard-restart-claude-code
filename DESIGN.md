@@ -57,7 +57,7 @@ Consequences for structure:
 
 ### The matcher stays narrow, deliberately
 
-The path filter `*WindowsApps\Claude_*` is load-bearing safety, not incidental.
+The install-path filter is load-bearing safety, not incidental.
 `account-swap` keeps a Claude Code CLI at
 
 ```
@@ -65,9 +65,21 @@ The path filter `*WindowsApps\Claude_*` is load-bearing safety, not incidental.
 ```
 
 whose basename is also `claude.exe`. Widening the matcher to a `*Claude*`
-substring would kill the user's own running CLI. A regression test asserts the
-query keeps the `WindowsApps\Claude_` anchor and never widens to `*Claude*` —
-testing an absence, because that absence is the safety property.
+substring would kill the user's own running CLI. Regression tests assert the
+matcher never widens to `*Claude*` - testing an absence, because that absence
+is the safety property.
+
+The match is a **prefix** test against `%ProgramFiles%\WindowsApps\Claude_`,
+evaluated in Python on the rows PowerShell returns. It was previously a
+`-like '*WindowsApps\Claude_*'` substring test inside the query, which also
+matched a path the user can create themselves, such as
+`%USERPROFILE%\WindowsApps\Claude_x\app\claude.exe`. That mattered because a
+matched process is not merely killed: its `--user-data-dir` is parsed back out
+and handed to the relaunch, and a Claude data dir holds
+`claude_desktop_config.json`, which defines MCP servers as command lines. So the
+weaker test let any process running as the user choose the data dir the real
+Desktop would restart against. `%ProgramFiles%\WindowsApps` is admin-only, which
+is the property the prefix test relies on.
 
 ### Lifecycle
 
