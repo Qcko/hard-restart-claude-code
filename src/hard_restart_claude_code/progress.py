@@ -21,6 +21,11 @@ PHASE_WAITING_PACKAGE = "waiting-package"
 PHASE_LAUNCHING = "launching"
 PHASE_WAITING_UP = "waiting-up"
 PHASE_DONE = "done"
+# Stopped is not done. A run that was asked to kill Desktop and leave it dead
+# ends successfully with Desktop DOWN, and reporting that as `done` tells a
+# reader the opposite of what happened - and leaves a status window asserting
+# Desktop is back while it is not.
+PHASE_STOPPED = "stopped"
 PHASE_FAILED = "failed"
 
 PHASES = (
@@ -30,6 +35,7 @@ PHASES = (
     PHASE_LAUNCHING,
     PHASE_WAITING_UP,
     PHASE_DONE,
+    PHASE_STOPPED,
     PHASE_FAILED,
 )
 

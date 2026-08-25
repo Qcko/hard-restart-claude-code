@@ -16,6 +16,7 @@ from .progress import (
     PHASE_DONE,
     PHASE_FAILED,
     PHASE_LAUNCHING,
+    PHASE_STOPPED,
     PHASE_STOPPING,
     PHASE_WAITING_DOWN,
     PHASE_WAITING_UP,
@@ -583,7 +584,7 @@ def hard_restart(
     elif pids:
         effects.sleeper(waits.settle_seconds)
     if no_launch:
-        effects.progress.publish(PHASE_DONE, "Claude Desktop stopped")
+        effects.progress.publish(PHASE_STOPPED, "Claude Desktop stopped")
         return outcome(launched=False)
     launched = _launch_verified(
         exe, launch_profile_dir(profile, profiles), waits, gate, effects, pids

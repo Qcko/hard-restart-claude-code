@@ -87,7 +87,7 @@ The state file's shape:
 | Field | Meaning |
 | --- | --- |
 | `schemaVersion` | Bumped when this table changes. |
-| `phase` | One of `stopping`, `waiting-down`, `waiting-package`, `launching`, `waiting-up`, `done`, `failed`. |
+| `phase` | One of `stopping`, `waiting-down`, `waiting-package`, `launching`, `waiting-up`, `done`, `stopped`, `failed`. `stopped` is a *success* with Desktop deliberately left down (`--no-launch`); `done` always means it is running. |
 | `detail` | A short human-readable headline for the phase. |
 | `label` | Whatever `--label` was given, or `null`. |
 | `attempt`, `maxAttempts` | Which launch attempt is in flight, and the bound. Integers. |

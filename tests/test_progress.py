@@ -14,6 +14,7 @@ from hard_restart_claude_code.progress import (
     PHASE_DONE,
     PHASE_FAILED,
     PHASE_LAUNCHING,
+    PHASE_STOPPED,
     PHASE_STOPPING,
     PHASE_WAITING_DOWN,
     PHASE_WAITING_PACKAGE,
@@ -375,6 +376,8 @@ def test_an_unverified_run_still_reaches_a_terminal_phase(tmp_path):
     assert _state(progress)["phase"] == PHASE_DONE
 
 
+# Stopped is not done: this run succeeded and Desktop is DOWN, and a reader told
+# `done` would say it is back.
 def test_stopping_without_launching_reaches_a_terminal_phase(tmp_path):
     progress = _progress(tmp_path)
     clock = Clock()
@@ -392,7 +395,7 @@ def test_stopping_without_launching_reaches_a_terminal_phase(tmp_path):
             progress=progress,
         ),
     )
-    assert _state(progress)["phase"] == PHASE_DONE
+    assert _state(progress)["phase"] == PHASE_STOPPED
 
 
 def test_an_unverified_missing_exe_publishes_a_path_free_failure(tmp_path):
