@@ -235,6 +235,7 @@ def test_hard_restart_kills_then_launches_with_profile(tmp_path):
         exe=exe,
         profile_dir=r"D:\reserve",
         launch_profile_dir=r"D:\reserve",
+        attempts=1,
     )
     assert events == [
         ("kill", [10, 11]),

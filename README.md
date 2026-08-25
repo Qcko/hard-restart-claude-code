@@ -25,7 +25,7 @@ hrcc --exe <path>           # override the Claude Desktop exe path
 hrcc --profile-dir <dir>    # relaunch against a specific --user-data-dir
 hrcc --no-profile           # relaunch bare, discarding the profile in use
 hrcc --json                 # emit the result as JSON instead of prose
-hrcc --verify               # wait for the package to be serviceable first
+hrcc --verify               # wait for the package, then confirm Desktop came back
 ```
 
 The exe is discovered at run time via `Get-AppxPackage -Name 'Claude'`, so it follows Store updates. Override with `--exe` if discovery fails.
@@ -54,22 +54,36 @@ hrcc --dry-run --simulate-package-status Disabled --package-budget 4
 
 `--dry-run` runs the gate too. It only reads, so a dry run stays a dry run, and it is the only way to watch the wait without restarting Desktop.
 
+### Confirming the relaunch
+
+Under `--verify`, spawning the executable is not the end of the restart. `hrcc` then polls for a live Desktop, and if none appears it backs off and launches again, up to eight times. The attempt that worked is reported as `attempts`.
+
+Whether Desktop came back is decided by looking for **Desktop**, never by watching the process `hrcc` spawned. An MSIX launcher hands off and exits within a second on a perfectly good launch, so treating that exit as failure would condemn a start that worked.
+
+The child's fate decides one thing only - whether trying again is safe:
+
+- **Child gone, Desktop still absent** after a few seconds' grace: the launch really failed. Back off and try again.
+- **Child still running**: Desktop is coming up slowly, not failing. `hrcc` stops and reports it. Launching again here is how one restart becomes two Desktops on two data dirs, which is worse than the wait. A launcher that cannot report the child's fate at all counts as still running, for the same reason.
+- **The process survey stops answering**: `hrcc` refuses to guess, and stops.
+
+All three of those exit 5 with Desktop down, so a caller must read the exit code rather than assume a return means Desktop is back.
+
 ### Exit codes
 
 | Code | Meaning |
 | --- | --- |
 | 0 | Success. |
-| 2 | Could not resolve a single Claude Desktop install, or `--exe` does not exist. Also argparse usage errors. |
+| 2 | Could not resolve a single Claude Desktop install, or `--exe` does not exist. Also argparse usage errors. Under `--verify` a missing executable is a failed *attempt* rather than this error, because an update in flight puts the package back within seconds. |
 | 3 | `--profile-dir` failed validation. |
 | 4 | Contradictory flags (`--profile-dir` with `--no-launch`). |
-| 5 | Could not confirm what was running, or Desktop would not go down. Nothing was relaunched; Desktop may already be stopped. |
+| 5 | Could not confirm the state of the restart: what was running, that Desktop went down, or that it came back. Desktop may be stopped. The prose and JSON both report which pids were killed, which is how "nothing happened, safe to retry" stays distinguishable from "Desktop is down and did not come back". |
 
 ### Stable interface
 
 These are the parts other tools may depend on. Anything else is an implementation detail and may change without notice.
 
 - The flag names above, and the exit-code table.
-- `--json`, whose keys are `killed`, `launched`, `exe`, `dry_run`, `observed_profile`, `observed_profile_conflict`, `launch_profile_dir`, `profile_source`, `package_status`. On a handled error it emits `error` and `exit_code` instead. **Prefer `--json` to parsing the prose output** — the human-readable lines are free to change wording. One gap to code for: a *usage* error (an unknown flag, or `--profile-dir` together with `--no-profile`) is rejected by the argument parser before `--json` is considered, so it exits 2 with a usage message on stderr and **no JSON on stdout**. Treat empty stdout as a usage error and read stderr.
+- `--json`, whose keys are `killed`, `launched`, `exe`, `dry_run`, `observed_profile`, `observed_profile_conflict`, `launch_profile_dir`, `profile_source`, `package_status`, `attempts`. `attempts` is the launch attempt that succeeded, and `0` whenever no launch was attempted at all - `--dry-run`, `--no-launch`, and every path that refuses before spawning. On a handled error it emits `error`, `exit_code`, `killed` and `attempts` instead, so a failed restart still says what it killed and how many launches it tried without anyone parsing the prose. **Prefer `--json` to parsing the prose output** — the human-readable lines are free to change wording. One gap to code for: a *usage* error (an unknown flag, or `--profile-dir` together with `--no-profile`) is rejected by the argument parser before `--json` is considered, so it exits 2 with a usage message on stderr and **no JSON on stdout**. Treat empty stdout as a usage error and read stderr.
 - `main` as an importable entry point (`from hard_restart_claude_code import main`), which is how a non-Python caller drives it through this package's interpreter.
 
 ## How it matches processes

@@ -53,6 +53,11 @@ def _gate(reader, clock: FakeClock, **overrides) -> PackageGate:
     return PackageGate(**settings)
 
 
+def _record(desktop, launched: list, exe) -> None:
+    launched.append(exe)
+    desktop.launch(exe)
+
+
 def _installed(tmp_path, status: str = PACKAGE_STATUS_OK) -> ClaudePackage:
     location = tmp_path / "Claude_1.0.0.0_x64__abc"
     (location / "app").mkdir(parents=True, exist_ok=True)
@@ -79,6 +84,11 @@ class DyingDesktop:
 
     def kill(self, _pids) -> None:
         self.alive = False
+
+    # The hardened path waits for Desktop to come back, so the fake has to come
+    # back. Without this the up-wait sits out its whole timeout on every test.
+    def launch(self, exe, _dir=None) -> None:
+        self.alive = True
 
 
 def _gate_for(argv: list[str]):
@@ -246,8 +256,8 @@ def test_restart_still_launches_when_the_gate_gives_up(tmp_path):
         effects=Effects(
             finder=desktop.find,
             killer=desktop.kill,
-            launcher=lambda e, _dir: launched.append(e),
-            sleeper=lambda _s: None,
+            launcher=lambda e, _dir: _record(desktop, launched, e),
+            sleeper=clock.sleep,
             clock=clock,
         ),
     )
@@ -270,8 +280,8 @@ def test_restart_launches_the_exe_the_gate_chose(monkeypatch, tmp_path):
         effects=Effects(
             finder=desktop.find,
             killer=desktop.kill,
-            launcher=lambda e, _dir: launched.append(e),
-            sleeper=lambda _s: None,
+            launcher=lambda e, _dir: _record(desktop, launched, e),
+            sleeper=clock.sleep,
             clock=clock,
         ),
     )

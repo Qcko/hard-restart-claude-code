@@ -255,6 +255,14 @@ seam must report the child's fate, so it returns a handle rather than nothing.
 within a second on a perfectly good launch, so a grace period after exit is part
 of the rule, not a tuning constant.
 
+The grace decides whether a retry is *permitted*; it does **not** end the wait.
+Ending it there would make the grace the real deadline, because on MSIX the child
+always exits - and a Desktop merely slower than the grace would then get a second
+one spawned on top of it, which is the outcome this whole section exists to
+prevent. The wait runs to its own timeout either way, and a launch that is truly
+dead costs that timeout per attempt. That is the trade: latency on an already
+failed launch, in exchange for never retrying over a live one.
+
 ### Progress, and who owns the state file
 
 hrcc becomes a **writer**. It does not own the reader, and it does not spawn a

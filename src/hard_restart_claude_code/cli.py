@@ -65,6 +65,7 @@ def main(argv: list[str] | None = None) -> int:
             EXIT_CANNOT_CONFIRM,
             as_json=args.json,
             killed=err.killed,
+            attempts=err.attempts,
         )
     except FileNotFoundError as err:
         return fail(f"error: {err}", EXIT_NO_EXE, as_json=args.json)
@@ -112,12 +113,24 @@ def report_package_status(status: str) -> None:
     print(f"package: {status}", file=sys.stderr)
 
 
-def fail(message: str, code: int, *, as_json: bool, killed: list[int] | None = None) -> int:
+def fail(
+    message: str,
+    code: int,
+    *,
+    as_json: bool,
+    killed: list[int] | None = None,
+    attempts: int = 0,
+) -> int:
     print(message, file=sys.stderr)
     if killed:
         print(f"killed before stopping: {', '.join(str(p) for p in killed)}", file=sys.stderr)
     if as_json:
-        payload = {"error": message, "exit_code": code, "killed": killed or []}
+        payload = {
+            "error": message,
+            "exit_code": code,
+            "killed": killed or [],
+            "attempts": attempts,
+        }
         print(json.dumps(payload, indent=2))
     return code
 
@@ -222,6 +235,7 @@ def result_as_dict(result, *, dry_run: bool) -> dict:
         "launch_profile_dir": result.launch_profile_dir,
         "profile_source": result.profile_source,
         "package_status": result.package_status,
+        "attempts": result.attempts,
     }
 
 
@@ -238,6 +252,8 @@ def print_result(result, *, dry_run: bool) -> None:
         return
     if result.launched:
         print(f"launched: {result.exe}")
+        if result.attempts > 1:
+            print(f"attempts: {result.attempts}")
     else:
         print("launch skipped")
 

@@ -30,25 +30,36 @@ class FakeClock:
 
 
 class Desktop:
-    """Reports processes until it is told how many polls it takes to die."""
+    """Reports processes until it is told how many polls it takes to die.
+
+    It comes back the moment it is launched, because the hardened path now waits
+    for that: a fake that stays dead after a launch would hold the up-wait open
+    for its whole timeout instead of testing the down-confirmation.
+    """
 
     def __init__(self, dies_after: int | None = 0, readable: bool = True) -> None:
         self.dies_after = dies_after
         self.readable = readable
         self.polls = 0
         self.killed: list[int] = []
+        self.relaunched = False
 
     def find(self) -> ProcessReport:
         if not self.readable:
             return ProcessReport(readable=False)
-        gone = self.killed and (
-            self.dies_after is not None and self.polls >= self.dies_after
+        gone = (
+            self.killed
+            and not self.relaunched
+            and (self.dies_after is not None and self.polls >= self.dies_after)
         )
         self.polls += 1
         return ProcessReport(True, () if gone else (ClaudeProcess(pid=1),))
 
     def kill(self, pids) -> None:
         self.killed.extend(pids)
+
+    def launch(self) -> None:
+        self.relaunched = True
 
 
 def _run(desktop: Desktop, exe, *, hardened=True, launched=None, waits=Waits()):
@@ -60,11 +71,16 @@ def _run(desktop: Desktop, exe, *, hardened=True, launched=None, waits=Waits()):
         effects=Effects(
             finder=desktop.find,
             killer=desktop.kill,
-            launcher=lambda e, _dir: (launched if launched is not None else []).append(e),
+            launcher=lambda e, _dir: _record(desktop, launched, e),
             sleeper=clock.sleep,
             clock=clock,
         ),
     )
+
+
+def _record(desktop: Desktop, launched, exe) -> None:
+    (launched if launched is not None else []).append(exe)
+    desktop.launch()
 
 
 def _exe(tmp_path):
@@ -79,7 +95,10 @@ def test_launch_waits_until_the_processes_are_actually_gone(tmp_path):
     _run(desktop, _exe(tmp_path), launched=launched)
     assert desktop.killed == [1]
     assert launched  # it did eventually launch
-    assert desktop.polls > 3  # and it kept looking until they were gone
+    # One enumeration, three down-confirmation polls, one up-confirmation poll.
+    # Pinned exactly: the up-wait shares this counter, so a loose bound would
+    # also pass with a down-confirmation that stopped a poll short.
+    assert desktop.polls == 5
 
 
 def test_a_desktop_that_will_not_die_blocks_the_relaunch(tmp_path):
@@ -146,7 +165,7 @@ def test_hardened_no_launch_still_confirms_the_kill(tmp_path):
         effects=Effects(
             finder=desktop.find,
             killer=desktop.kill,
-            launcher=lambda e, _d: launched.append(e),
+            launcher=lambda e, _d: _record(desktop, launched, e),
             sleeper=lambda _s: None,
             clock=FakeClock(),
         ),
@@ -186,7 +205,7 @@ def test_the_hardened_path_does_not_also_sleep_the_settle(tmp_path):
         effects=Effects(
             finder=desktop.find,
             killer=desktop.kill,
-            launcher=lambda _e, _d: None,
+            launcher=lambda _e, _d: desktop.launch(),
             sleeper=lambda s: slept.append(s),
             clock=clock,
         ),

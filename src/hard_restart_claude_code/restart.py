@@ -27,6 +27,13 @@ PACKAGE_STATUS_UNREADABLE = "unreadable"
 PACKAGE_STATUS_NOT_REGISTERED = "not registered"
 PACKAGE_STATUS_BUDGET_SPENT = "budget-exhausted"
 
+LAUNCH_ATTEMPTS = 8
+LAUNCH_BACKOFF_SECONDS = 2.0
+LAUNCH_BACKOFF_CAP_SECONDS = 8.0
+UP_TIMEOUT_SECONDS = 30.0
+UP_POLL_SECONDS = 2.0
+EXIT_GRACE_SECONDS = 8.0
+
 Runner = Callable[[Sequence[str]], "CompletedLike"]
 
 
@@ -56,9 +63,12 @@ class ProcessReport:
 # "Desktop is down and did not come back", which a caller cannot otherwise tell
 # from the exit code alone.
 class RestartBlocked(RuntimeError):
-    def __init__(self, message: str, killed: Sequence[int] = ()) -> None:
+    def __init__(
+        self, message: str, killed: Sequence[int] = (), attempts: int = 0
+    ) -> None:
         super().__init__(message)
         self.killed = list(killed)
+        self.attempts = attempts
 
 
 class ProfileDirError(ValueError):
@@ -121,6 +131,7 @@ class Result:
     launch_profile_dir: str | None = None
     profile_source: str = PROFILE_SOURCE_INFERRED
     package_status: str | None = None
+    attempts: int = 0
 
 
 def discover_exe(runner: Runner | None = None) -> Path | None:
@@ -439,13 +450,21 @@ def kill_pids(pids: list[int], runner: Runner | None = None) -> None:
         runner(["taskkill", "/F", "/PID", str(pid)])
 
 
+# The verified launch needs the child's fate, not merely the fact that a spawn
+# happened: "still alive but Desktop not up" is the one case where trying again
+# would produce a SECOND Desktop. So the launcher seam hands back a handle.
+@dataclass(frozen=True)
+class LaunchHandle:
+    running: Callable[[], bool]
+
+
 def launch(
     exe: Path,
     profile_dir: str | None = None,
-    launcher: Callable[[Path, str | None], None] | None = None,
-) -> None:
+    launcher: Callable[[Path, str | None], LaunchHandle | None] | None = None,
+) -> LaunchHandle | None:
     launcher = launcher or _default_launch
-    launcher(exe, profile_dir)
+    return launcher(exe, profile_dir)
 
 
 # The injected side effects, grouped. DESIGN.md's "inject side effects"
@@ -456,7 +475,7 @@ def launch(
 class Effects:
     finder: Callable[[], ProcessReport] = survey_processes
     killer: Callable[[list[int]], None] = kill_pids
-    launcher: Callable[[Path, str | None], None] = launch
+    launcher: Callable[[Path, str | None], LaunchHandle | None] = launch
     sleeper: Callable[[float], None] = time.sleep
     clock: Callable[[], float] = time.monotonic
 
@@ -472,6 +491,15 @@ class Waits:
     settle_seconds: float = 1.0
     down_timeout_seconds: float = 15.0
     down_poll_seconds: float = 0.3
+    up_timeout_seconds: float = UP_TIMEOUT_SECONDS
+    up_poll_seconds: float = UP_POLL_SECONDS
+    # An MSIX launcher hands off and exits within a second on a GOOD launch, so
+    # an exit only becomes evidence of failure once Desktop has had a few more
+    # seconds to appear. Part of the rule, not a tuning constant.
+    exit_grace_seconds: float = EXIT_GRACE_SECONDS
+    launch_attempts: int = LAUNCH_ATTEMPTS
+    launch_backoff_seconds: float = LAUNCH_BACKOFF_SECONDS
+    launch_backoff_cap_seconds: float = LAUNCH_BACKOFF_CAP_SECONDS
 
     # Same hazard as PackageGate's poll: a zero interval hammers the reader for
     # the whole timeout, and against a clock that only advances on sleep it never
@@ -481,6 +509,16 @@ class Waits:
             raise ValueError("down-confirmation poll interval must be above zero")
         if self.down_timeout_seconds < 0:
             raise ValueError("down-confirmation timeout must not be negative")
+        if self.up_poll_seconds <= 0:
+            raise ValueError("launch-confirmation poll interval must be above zero")
+        if self.launch_attempts < 1:
+            raise ValueError("a launch needs at least one attempt")
+        if min(self.up_timeout_seconds, self.exit_grace_seconds) < 0:
+            raise ValueError("launch-confirmation waits must not be negative")
+        # A negative backoff reaches the real time.sleep, which would raise from
+        # inside the retry loop with Desktop already down.
+        if min(self.launch_backoff_seconds, self.launch_backoff_cap_seconds) < 0:
+            raise ValueError("launch backoff must not be negative")
 
 
 DEFAULT_WAITS = Waits()
@@ -526,17 +564,172 @@ def hard_restart(
         effects.sleeper(waits.settle_seconds)
     if no_launch:
         return outcome(launched=False)
-    # Resolve the exe AFTER the kill, not before: an update that lands while
-    # Desktop is going down moves the package folder out from under a path
-    # resolved earlier.
-    gated_exe, package_status = await_package_ready(gate)
-    exe = gated_exe or exe
-    if not exe.exists():
-        raise FileNotFoundError(f"Claude Desktop exe not found: {exe}")
-    effects.launcher(exe, launch_profile_dir(profile, profiles))
-    return _partial_result(exe, pids, profiles, profile)(
-        launched=True, package_status=package_status
+    launched = _launch_verified(
+        exe, launch_profile_dir(profile, profiles), waits, gate, effects, pids
     )
+    return _partial_result(launched.exe, pids, profiles, profile)(
+        launched=True,
+        package_status=launched.package_status,
+        attempts=launched.attempts,
+    )
+
+
+@dataclass(frozen=True)
+class LaunchOutcome:
+    exe: Path
+    package_status: str | None
+    attempts: int
+
+
+# The unhardened path spawns and returns, exactly as it always did. The hardened
+# one spawns, waits for Desktop to actually appear, and retries - but only when
+# retrying is safe, which is the rule the loop below exists to enforce.
+def _launch_verified(
+    exe: Path,
+    profile_dir: str | None,
+    waits: Waits,
+    gate: PackageGate,
+    effects: Effects,
+    killed: Sequence[int],
+) -> LaunchOutcome:
+    # One deadline for the whole restart, computed here and threaded into every
+    # attempt. Recomputed per attempt it would multiply by the attempt count, and
+    # a stuck package could hold the restart for the budget times eight.
+    deadline = gate.clock() + gate.budget_seconds if gate.enabled else None
+    attempts = waits.launch_attempts if gate.enabled else 1
+    reason = ""
+    for attempt in range(1, attempts + 1):
+        # Resolve the exe per attempt, and only AFTER the kill: an update landing
+        # mid-restart moves the package folder out from under a path resolved
+        # earlier, which would fail every remaining attempt for a stale reason.
+        gated_exe, package_status = await_package_ready(gate, deadline)
+        target = gated_exe or exe
+        if not gate.enabled:
+            if not target.exists():
+                raise FileNotFoundError(f"Claude Desktop exe not found: {target}")
+            effects.launcher(target, profile_dir)
+            return LaunchOutcome(target, package_status, attempt)
+        verdict = _attempt(target, profile_dir, waits, effects)
+        if verdict.up:
+            return LaunchOutcome(target, package_status, attempt)
+        reason = verdict.reason
+        # THE rule of this slice: a child that is still alive means Desktop is
+        # coming up slowly, not failing. Spawning again there is how one restart
+        # becomes two Desktops on two data dirs.
+        if not verdict.retryable:
+            raise RestartBlocked(verdict.reason, killed, attempt)
+        if attempt < attempts:
+            effects.sleeper(_backoff_seconds(waits, attempt))
+    raise RestartBlocked(
+        f"Claude Desktop would not start after {attempts} attempts: {reason}",
+        killed,
+        attempts,
+    )
+
+
+# The exe going missing from under us mid-update is the very situation the
+# hardened path exists to ride out, so it is a failed attempt rather than the end
+# of the restart. Only the unhardened path, which has no second attempt to offer,
+# still turns it into an error.
+def _attempt(
+    exe: Path, profile_dir: str | None, waits: Waits, effects: Effects
+) -> UpVerdict:
+    if not exe.exists():
+        return UpVerdict(
+            up=False, retryable=True, reason=f"Claude Desktop exe not found: {exe}"
+        )
+    handle = effects.launcher(exe, profile_dir)
+    return _await_desktop_up(handle, waits, effects)
+
+
+@dataclass(frozen=True)
+class UpVerdict:
+    up: bool
+    retryable: bool = False
+    reason: str = ""
+
+
+DESKTOP_UP = UpVerdict(up=True)
+
+
+# Whether Desktop appeared is decided by polling for IT, never by watching the
+# process we spawned: an MSIX launcher hands off and exits within a second on a
+# perfectly good launch, so reading that exit as failure would condemn a start
+# that worked. The child's fate decides one thing only - whether another attempt
+# is safe - and it deliberately does NOT cut the wait short. On MSIX the child
+# always exits, so bailing out at the grace would make the grace the real
+# deadline, and a Desktop merely slower than that would get a second one spawned
+# on top of it.
+def _await_desktop_up(
+    handle: LaunchHandle | None, waits: Waits, effects: Effects
+) -> UpVerdict:
+    deadline = effects.clock() + waits.up_timeout_seconds
+    exited_at: float | None = None
+    while True:
+        report = effects.finder()
+        if not report.readable:
+            # Blind. Another attempt would be a guess, and a wrong guess here
+            # launches a second Desktop.
+            return UpVerdict(
+                up=False,
+                reason=(
+                    "lost sight of Claude Desktop while waiting for it to come "
+                    "back - cannot tell whether it is up"
+                ),
+            )
+        if report.processes:
+            return DESKTOP_UP
+        exited_at = _exit_time(handle, exited_at, effects)
+        if effects.clock() >= deadline:
+            break
+        effects.sleeper(waits.up_poll_seconds)
+    # Retrying is safe only if the child is long gone. A child that exited in the
+    # last instant before the deadline has not yet earned that, and one still
+    # running never does.
+    if _grace_spent(exited_at, waits, effects):
+        return _exited_verdict()
+    return UpVerdict(
+        up=False,
+        reason="gave up waiting for Claude Desktop: it did not appear in time",
+    )
+
+
+def _backoff_seconds(waits: Waits, attempt: int) -> float:
+    return min(waits.launch_backoff_seconds * attempt, waits.launch_backoff_cap_seconds)
+
+
+def _exit_time(
+    handle: LaunchHandle | None, exited_at: float | None, effects: Effects
+) -> float | None:
+    if exited_at is not None:
+        return exited_at
+    return None if _child_alive(handle) else effects.clock()
+
+
+def _grace_spent(exited_at: float | None, waits: Waits, effects: Effects) -> bool:
+    if exited_at is None:
+        return False
+    return effects.clock() - exited_at >= waits.exit_grace_seconds
+
+
+def _exited_verdict() -> UpVerdict:
+    return UpVerdict(
+        up=False,
+        retryable=True,
+        reason="the launched process exited without starting Claude Desktop",
+    )
+
+
+# A launcher that reports nothing leaves the child's fate unknown, and unknown
+# has to read as "still alive": the retry the other answer unlocks is precisely
+# the one that produces a second Desktop.
+def _child_alive(handle: LaunchHandle | None) -> bool:
+    if handle is None:
+        return True
+    try:
+        return bool(handle.running())
+    except Exception:
+        return True
 
 
 # taskkill returning is not termination, and the pid list was a snapshot taken
@@ -564,10 +757,13 @@ def _settle(effects: Effects, waits: Waits, killed: Sequence[int]) -> None:
         effects.sleeper(waits.down_poll_seconds)
 
 
-def await_package_ready(gate: PackageGate) -> tuple[Path | None, str | None]:
+def await_package_ready(
+    gate: PackageGate, deadline: float | None = None
+) -> tuple[Path | None, str | None]:
     if not gate.enabled:
         return None, None
-    deadline = gate.clock() + gate.budget_seconds
+    if deadline is None:
+        deadline = gate.clock() + gate.budget_seconds
     while gate.clock() < deadline:
         report = _read_or_unreadable(gate)
         if not report.readable:
@@ -619,7 +815,9 @@ def profile_source(profile: ProfileChoice) -> str:
 def _partial_result(
     exe: Path, pids: list[int], profiles: list[str], profile: ProfileChoice
 ) -> Callable[..., Result]:
-    def build(*, launched: bool, package_status: str | None = None) -> Result:
+    def build(
+        *, launched: bool, package_status: str | None = None, attempts: int = 0
+    ) -> Result:
         return Result(
             killed=pids,
             launched=launched,
@@ -629,6 +827,7 @@ def _partial_result(
             launch_profile_dir=launch_profile_dir(profile, profiles),
             profile_source=profile_source(profile),
             package_status=package_status,
+            attempts=attempts,
         )
 
     return build
@@ -643,12 +842,13 @@ def _default_capture(cmd: Sequence[str]) -> CompletedLike:
     return CompletedLike(stdout=proc.stdout, returncode=proc.returncode)
 
 
-def _default_launch(exe: Path, profile_dir: str | None = None) -> None:
+def _default_launch(exe: Path, profile_dir: str | None = None) -> LaunchHandle:
     argv = [str(exe)]
     if profile_dir:
         argv.append(f"{PROFILE_FLAG}={profile_dir}")
-    subprocess.Popen(
+    child = subprocess.Popen(
         argv,
         creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
         close_fds=True,
     )
+    return LaunchHandle(running=lambda: child.poll() is None)
