@@ -19,8 +19,8 @@ Claude Desktop install directory, kill them all, then relaunch.
 
 - Windows only. Microsoft Store install of Claude Desktop.
 - One CLI: `hard-restart-claude-code` (alias `hrcc`).
-- Default behavior: kill every `claude.exe` whose `Path` lives under
-  `WindowsApps\Claude_*`, wait briefly, relaunch the app.
+- Default behavior: kill every `claude.exe` whose executable path is under
+  `<ProgramFiles>\WindowsApps\Claude_`, wait briefly, relaunch the app.
 - Flags: `--exe <path>` to override, `--dry-run` to inspect without acting,
   `--no-launch` to kill without relaunch.
 - Zero runtime dependencies (stdlib only). Dev deps: `pytest`, `ruff`.
@@ -56,7 +56,12 @@ Still out of scope, and stated so it reads as considered rather than forgotten:
 
 - **Match by install path, not just name.** `claude.exe` is also the name of
   unrelated binaries; matching only by basename risks killing the wrong thing.
-  Filter by `$_.Path -like '*WindowsApps\Claude_*'`.
+  Keep `ExecutablePath` and test it as a **prefix** against
+  `<ProgramFiles>\WindowsApps\Claude_`, in Python rather than in the PowerShell
+  query. A substring test is not enough: it also matches a directory the user
+  can create, and a matched process has its `--user-data-dir` read back and
+  handed to the relaunch. `<ProgramFiles>\WindowsApps` is admin-only, and that
+  is the property the match relies on.
 - **Inject side effects.** `find_pids` / `kill_pids` / `launch` are passed in
   as callables to `hard_restart` so the orchestration is unit-testable without
   touching real processes.

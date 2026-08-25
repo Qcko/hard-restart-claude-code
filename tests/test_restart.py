@@ -23,7 +23,10 @@ from hard_restart_claude_code.restart import (
 INSTALL_PREFIX = package_install_prefix()
 DESKTOP_PATH = INSTALL_PREFIX + r"1.32352.1.0_x64__pzs8sxrjxfjjc\app\claude.exe"
 RESERVE_CLI_PATH = (
-    r"E:\dev\secrets\account-swap\userdata\reserve\claude-code\2.1.229\claude.exe"
+    # A stand-in for the account-swap managed Claude Code CLI, which shares the
+    # claude.exe basename but lives outside the package dir. The location is
+    # per-machine, so the test uses a placeholder rather than a real one.
+    r"D:\profiles\reserve\claude-code\2.1.229\claude.exe"
 )
 
 
