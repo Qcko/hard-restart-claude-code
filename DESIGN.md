@@ -145,6 +145,228 @@ Distinct install locations are now collected, and anything other than exactly on
 returns `None`, so the CLI fails with its existing clear message instead of
 guessing. Duplicate identical rows are tolerated, since they are not ambiguous.
 
+## Hardening the relaunch (opt-in)
+
+`hard_restart` relaunches and returns. It does not check that Desktop came back,
+and it cannot see that an MSIX update has left the package `Disabled` for the
+second or two Windows needs to service it. A relaunch that loses that race
+leaves Desktop down with nobody retrying and nobody reporting.
+
+`account-swap` already solved this, in the wrong place. It calls
+`hrcc --no-launch` to stop Desktop, throws away hrcc's launch, and reimplements
+it with a readiness gate, bounded retry and liveness verification. That split
+puts a process boundary in the middle of one restart, and the two halves talk
+across it by **scraping hrcc's human-readable stdout** - the caller matches the
+`matched pids:` line with a regex and carries an explicit hedge for "its output
+shape has changed". A cosmetic reword of one `print` in `cli.py` breaks a
+caller's liveness probe. That seam, not tidiness, is the reason the hardening
+belongs here.
+
+### What turns it on
+
+**Nothing, by default.** A bare `hrcc` keeps today's behaviour exactly: kill,
+settle, relaunch, return in about a second, no window, no polling. That matters
+because `hrcc` is normally typed by a human from a shell inside Desktop, and a
+command that can now block for minutes is a different tool than the one they
+learned.
+
+The hardened path is opt-in and implied by `--profile-dir`:
+
+| Flag | Effect |
+| --- | --- |
+| `--profile-dir <dir>` | Launch against this data dir; implies `--verify`. |
+| `--no-profile` | Launch bare. Distinct from omitting `--profile-dir`. |
+| `--verify` | Down-confirmation, readiness gate, verified launch, retry. |
+| `--progress-file <path>` | Publish phase transitions here. Defaults to hrcc's own dir. |
+| `--label <text>` | Opaque display string echoed into the progress file. |
+| `--json` | Machine-readable result on stdout. |
+
+Omitting `--profile-dir` is **not** the same as `--no-profile`. Omitting it
+preserves whatever profile was already running, which is right for a human
+restarting in place and catastrophic for a caller whose entire purpose is
+switching to a different one: a dropped flag would silently relaunch the previous
+account and look like it worked. Callers pass the flag explicitly, always.
+
+`--label` is how the progress file gets a human-meaningful name without hrcc
+learning what an account is. hrcc knows a directory. If a future change wants to
+call this `--account`, the boundary has leaked.
+
+### Confirming Desktop is down
+
+`settle_seconds` is **replaced**, not kept alongside the new wait. `taskkill /F`
+returning is not termination, and the pid list is a snapshot taken before the
+kill, so a process that appears during it is invisible. The hardened path
+re-runs the finder against a deadline until the matched set is empty.
+
+The reader must distinguish "no Desktop processes" from "the query failed", and
+**refuse to launch on the second**. Relaunching while blind is how two Desktops
+happen. `_decode_rows` currently collapses both to an empty list, and a test
+asserts that collapse, so the reader and that test both change as part of this.
+
+### The package-readiness gate
+
+Before each launch attempt, poll the package status until a package reports `Ok`
+with its executable present, and launch that one. The budget is a single
+deadline computed once at entry and threaded down - recomputed per attempt it
+would multiply by the attempt count.
+
+The gate **fails open**. If the package query cannot run at all, stop waiting
+immediately and let the launch be judged on its own result; if the budget
+expires, launch anyway. A gate that cannot verify must never be the reason a
+working restart does not happen. This is easy to invert while porting, so it is
+stated here rather than left in a comment.
+
+A forced-status seam (`--simulate-package-status Disabled`) exercises the whole
+path on demand. Without it the only trigger is a real MSIX update landing inside
+the restart window, which is why this code has never once run in production
+despite being written to handle it. Seams make the *reaction* testable; the
+*premise* - that Windows really reports `Disabled`, and that launching into it
+really fails - stays integration-only, and the simulate flag is how it gets
+exercised deliberately instead of by ambush.
+
+### Verified launch and the no-retry rule
+
+After spawning, poll for a live Desktop. On failure, back off and try again,
+bounded. One rule carries over verbatim, because getting it wrong produces the
+worst outcome in this design:
+
+> If the spawned child is **still alive** but Desktop is not up, do **not**
+> relaunch. Publish failure and stop.
+
+A still-running child means Desktop is coming up slowly, not failing. Launching
+again produces two Desktops on two data dirs. The corollary is that the launcher
+seam must report the child's fate, so it returns a handle rather than nothing.
+"Exited" is not immediately "failed" either: an MSIX launcher hands off and exits
+within a second on a perfectly good launch, so a grace period after exit is part
+of the rule, not a tuning constant.
+
+### Progress, and who owns the state file
+
+hrcc becomes a **writer**. It does not own the reader, and it does not spawn a
+UI.
+
+The widget is PowerShell that lives in `account-swap`, deliberately shaped to
+stack with that project's usage widget - same mutex idiom, same position file,
+same chrome. Moving it here would orphan it from the only thing it coordinates
+with, and hand a zero-dependency CLI a WPF subsystem with no second consumer.
+
+hrcc therefore takes `--progress-file <path>` and defaults it to its **own**
+directory. Hardcoding a consumer's path would put that consumer's name in this
+tool's source, which is the same dependency inversion the profile design already
+refuses. `account-swap` passes its existing path, so its widget and its directory
+are untouched.
+
+The file is single-slot and rewritten on every publish. Its contract:
+
+- `schemaVersion`, so a reader upgraded on a different cadence can tell.
+  **Strict writer, lenient reader**: the writer rejects an unknown phase, the
+  reader ignores unknown fields and falls back to the free-text detail on an
+  unknown phase rather than mis-rendering.
+- Timestamps are RFC 3339 with an explicit offset or `Z`. A naive UTC string is
+  read as **local** time by the PowerShell reader, which puts every frame past
+  its staleness cutoff and shows a "waiting to start" screen for the entire
+  restart. Unit-test the exact string.
+- UTF-8, no BOM. Integers stay integers.
+- Write-temp-then-rename, **with the fallback to a plain overwrite when rename
+  fails**. MSIX virtualization of the local app-data path produced exactly that
+  failure and silently disabled the whole status channel; catch broadly rather
+  than testing for a specific errno, because under the filter driver it is not
+  reliable.
+- A publish failure never breaks the restart. That includes the phase-name
+  validation.
+- Published strings stay path-free. The natural exception messages here embed a
+  profile path, and a profile path points into a private directory; keep the full
+  text in the local log and publish a short reason.
+
+Because the file is overwritten, it is evidence of the *current* phase and never
+of the run. A 7.6-second success records a null package status and is
+indistinguishable from a run where the gate never fired - precisely the confusion
+that made this gate hard to reason about. A per-run append-only trace beside it
+fixes that, and the writer is being rewritten anyway.
+
+### Surviving the kill
+
+hrcc is a descendant of a `claude.exe` in its own kill list. It survives only
+because kills are individual `/F /PID` and never `/T` - see "Why `taskkill` must
+NOT use `/T`" below, which measured the ancestry. Nothing about the hardened path
+changes this, and it does **not** need to self-detach: a caller in exactly this
+position ran a full stop-and-relaunch and published its terminal phase
+afterwards, so the orphaned-but-alive case is observed, not assumed.
+
+What does change is duration. The orphan's parent is gone, so **stdout is a dead
+pipe**, and a run that now lasts minutes writes to it many times where a
+one-second run barely did. Writes to the result channel must tolerate a broken
+pipe. Exit status still works, because the caller that reads it is a sibling
+survivor, not the killed parent.
+
+Two hardened runs must not overlap. Now that this path is reachable from a
+user-facing CLI as well as from a caller, take a named mutex for the duration and
+have the second invocation refuse with a clear message. `--dry-run` never takes
+it.
+
+### Precedence, exit codes, and machine-readable output
+
+An explicit `--profile-dir` **always wins** over inference, and a value that
+fails validation is a non-zero exit, never a silent fall back to the inferred
+dir. Falling back would launch Desktop on the profile that *was* running while
+the caller records the one it asked for - a cross-account session confusion with
+live credentials in both directories. Multiple running profiles are still
+detected and still reported, but with the dir given explicitly that is
+information about what was killed, not a warning about a choice hrcc made.
+
+`--profile-dir` is validated before use: absolute after resolution, no UNC or
+device paths, not an existing file, no embedded NUL or newline. The value flows
+into a list argv and is never joined into a command line, and it must never be
+interpolated into a PowerShell `-Command` string - comparisons against it happen
+in Python, on rows PowerShell returned. `_powershell()` receives literals only.
+
+The hardened path has more ways to fail than "could not resolve exe", and a
+caller cannot report anything useful if they collapse into one number. Exit codes
+become a documented table, and `--json` emits the result as an object so no
+caller ever regex-scrapes prose again.
+
+### What stays in `account-swap`
+
+The account domain: which accounts exist, where their profiles live, syncing
+shared Desktop config into one, recording which is active, and the widget. hrcc
+gains no knowledge of any of it. `--no-launch` also stays, because it is the
+honest primitive for "stop Desktop and leave it stopped", and it is the only
+thing that lets an older caller work against a newer hrcc.
+
+### Lifecycle (hardened)
+
+The default path is unchanged - see the Lifecycle diagram above. This is what
+`--profile-dir` adds.
+
+```mermaid
+flowchart TD
+    start([hrcc --profile-dir DIR]) --> validate{Path valid?}
+    validate -->|no| bail([exit: invalid profile dir<br/>never fall back to inferred])
+    validate -->|yes| lock{Another hardened<br/>run in progress?}
+    lock -->|yes| busy([exit: restart already running])
+    lock -->|no| kill[Publish stopping<br/>taskkill /F per pid, NOT /T]
+
+    kill --> down[Publish waiting-down<br/>re-run finder until empty]
+    down --> downstate{Matched set}
+    downstate -->|query failed| blind([exit: cannot tell<br/>refuse to launch blind])
+    downstate -->|still there at deadline| blind
+    downstate -->|empty| gate
+
+    gate[Publish waiting-package<br/>poll status against one budget]
+    gate --> ready{Package state}
+    ready -->|still servicing| gate
+    ready -->|Ok and exe present, OR<br/>unreadable, OR budget spent<br/>the gate fails open| spawn
+
+    spawn[Publish launching<br/>spawn exe with --user-data-dir]
+    spawn --> up[Publish waiting-up<br/>poll for a live Desktop]
+    up --> live{Desktop up?}
+    live -->|yes| ok([Publish done<br/>exit 0])
+    live -->|no, child still alive| stop([Publish failed<br/>relaunching now would<br/>make a SECOND Desktop])
+    live -->|no, child gone| retry{Attempts left?}
+    retry -->|yes| backoff[Back off] --> spawn
+    retry -->|no| givein([Publish failed<br/>exit: would not start])
+```
+
 ## Appendix: why "Relaunch to update" can fail
 
 Recorded because it took real instrumentation to find, and the cause is
