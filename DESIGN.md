@@ -331,6 +331,17 @@ user-facing CLI as well as from a caller, take a named mutex for the duration an
 have the second invocation refuse with a clear message. `--dry-run` never takes
 it.
 
+A **named mutex** rather than a lock file, because this process is routinely
+killed or orphaned by the very restart it performs. The kernel drops the handle
+when the process dies, so there is no stale lock to age out and nothing to clean
+up after a crash - a lock file would need exactly the liveness check that this
+whole design has already found hard to get right. It **fails open**: a lock that
+cannot be taken at all must never become the reason a working restart does not
+happen, which is the rule the package gate follows. And a bare `hrcc` neither
+takes it nor is blocked by it, because that command has never coordinated with
+anything and making it start refusing would change the one path this project
+promises to leave alone.
+
 ### Precedence, exit codes, and machine-readable output
 
 An explicit `--profile-dir` **always wins** over inference, and a value that

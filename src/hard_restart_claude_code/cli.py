@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+from .lock import RunLock, acquire_run_lock
 from .progress import PHASE_WAITING_PACKAGE, Progress, default_progress_file, open_progress
 from .restart import (
     DEFAULT_WAITS,
@@ -30,6 +31,12 @@ EXIT_NO_EXE = 2
 EXIT_BAD_PROFILE_DIR = 3
 EXIT_CONTRADICTORY_FLAGS = 4
 EXIT_CANNOT_CONFIRM = 5
+EXIT_ALREADY_RUNNING = 6
+
+BUSY_MESSAGE = (
+    "error: another hardened restart is already in progress. Starting a second "
+    "one would kill the Claude Desktop the first is still bringing up."
+)
 
 NO_EXE_MESSAGE = (
     "error: could not resolve a single Claude Desktop install - either none was "
@@ -51,6 +58,27 @@ def main(argv: list[str] | None = None) -> int:
     exe = args.exe or discover_exe()
     if exe is None:
         return fail(NO_EXE_MESSAGE, EXIT_NO_EXE, as_json=args.json)
+
+    lock = take_run_lock(args)
+    if lock.busy:
+        return fail(BUSY_MESSAGE, EXIT_ALREADY_RUNNING, as_json=args.json)
+    try:
+        return run_restart(args, exe, profile)
+    finally:
+        lock.release()
+
+
+# Only the hardened path takes it, and --dry-run never does. A bare hrcc is a
+# one-second kill-and-relaunch that has never coordinated with anything, and
+# making it start refusing would change the one command this project promises
+# to leave alone.
+def take_run_lock(args) -> RunLock:
+    if args.dry_run or not wants_verification(args):
+        return RunLock()
+    return acquire_run_lock()
+
+
+def run_restart(args, exe, profile) -> int:
     progress = build_progress(args)
     try:
         result = hard_restart(

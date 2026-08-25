@@ -104,7 +104,7 @@ Notes for anyone writing a reader:
 - The file is written temp-then-renamed, falling back to a plain overwrite when the rename fails - which it does, permanently, under MSIX path virtualization. A reader may therefore see a torn file on rare occasions and should treat an unparseable read as a skipped frame rather than an error.
 - **Publishing never breaks the restart.** If the file cannot be written, `hrcc` carries on and warns.
 
-- **One run at a time per file.** The state slot and the trace are single-writer. Two `hrcc` runs pointed at the same path will interleave, and nothing yet stops them.
+- **One run at a time.** Two verifying runs cannot overlap - the second refuses with exit 6 (see below), so the state slot and the trace stay single-writer.
 
 Without `--progress-file`, a verifying run publishes into `~/.hrcc/`. A bare `hrcc` publishes nothing, and neither does `--dry-run`, which changes nothing by definition. Given the flag explicitly, an unverified run still publishes `stopping` and then a terminal phase - every path that ends a restart leaves one behind, because a file parked on `stopping` forever cannot be told from a hung restart.
 
@@ -117,6 +117,7 @@ Without `--progress-file`, a verifying run publishes into `~/.hrcc/`. A bare `hr
 | 3 | `--profile-dir` failed validation. |
 | 4 | Contradictory flags (`--profile-dir` with `--no-launch`). |
 | 5 | Could not confirm the state of the restart: what was running, that Desktop went down, or that it came back. Desktop may be stopped. The prose and JSON both report which pids were killed, which is how "nothing happened, safe to retry" stays distinguishable from "Desktop is down and did not come back". |
+| 6 | Another verifying restart is already in progress; this one did nothing. Only `--verify` runs take the lock, and `--dry-run` never does, so a bare `hrcc` is neither blocked by one nor blocks one. |
 
 ### Stable interface
 
