@@ -210,6 +210,8 @@ with its executable present, and launch that one. The budget is a single
 deadline computed once at entry and threaded down - recomputed per attempt it
 would multiply by the attempt count.
 
+Mid-update the staged and installed packages are both listed. The gate takes the **first serviceable** one, unlike `discover_exe`, which refuses all ambiguity - an `Ok` package is precisely what the gate is waiting for, and refusing it would strand the restart this exists to rescue.
+
 The gate **fails open**. If the package query cannot run at all, stop waiting
 immediately and let the launch be judged on its own result; if the budget
 expires, launch anyway. A gate that cannot verify must never be the reason a

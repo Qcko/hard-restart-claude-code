@@ -6,12 +6,18 @@ import sys
 from pathlib import Path
 
 from .restart import (
+    NO_GATE,
+    PACKAGE_BUDGET_SECONDS,
+    PACKAGE_STATUS_OK,
     PROFILE_SOURCE_EXPLICIT,
     PROFILE_SOURCE_NONE,
+    PackageGate,
     ProfileChoice,
     ProfileDirError,
     discover_exe,
     hard_restart,
+    read_packages,
+    simulated_reader,
     validate_profile_dir,
 )
 
@@ -42,7 +48,11 @@ def main(argv: list[str] | None = None) -> int:
         return fail(NO_EXE_MESSAGE, EXIT_NO_EXE, as_json=args.json)
     try:
         result = hard_restart(
-            exe, dry_run=args.dry_run, no_launch=args.no_launch, profile=profile
+            exe,
+            dry_run=args.dry_run,
+            no_launch=args.no_launch,
+            profile=profile,
+            gate=build_gate(args),
         )
     except FileNotFoundError as err:
         return fail(f"error: {err}", EXIT_NO_EXE, as_json=args.json)
@@ -68,6 +78,26 @@ def resolve_profile_choice(args) -> ProfileChoice:
             "--profile-dir asks for a relaunch and --no-launch forbids one"
         )
     return ProfileChoice(explicit=validate_profile_dir(args.profile_dir))
+
+
+# Verification is opt-in and implied by --profile-dir. A bare hrcc keeps its
+# one-second kill-and-relaunch, because it is normally typed by a human from a
+# shell inside Desktop and a command that can block for minutes is a different
+# tool than the one they learned.
+def build_gate(args) -> PackageGate:
+    simulate = args.simulate_package_status
+    if not (args.verify or args.profile_dir is not None or simulate):
+        return NO_GATE
+    return PackageGate(
+        enabled=True,
+        budget_seconds=args.package_budget,
+        reader=simulated_reader(simulate) if simulate else read_packages,
+        on_status=report_package_status,
+    )
+
+
+def report_package_status(status: str) -> None:
+    print(f"package: {status}", file=sys.stderr)
 
 
 def fail(message: str, code: int, *, as_json: bool) -> int:
@@ -99,12 +129,52 @@ def build_parser() -> argparse.ArgumentParser:
         help="Kill matching processes but skip relaunch.",
     )
     add_profile_flags(parser)
+    add_verify_flags(parser)
     parser.add_argument(
         "--json",
         action="store_true",
         help="Emit the result as JSON. Prefer this to parsing the prose output.",
     )
     return parser
+
+
+def add_verify_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help=(
+            "Wait for the Claude package to be serviceable before launching. "
+            "Implied by --profile-dir. Off by default so a bare restart stays fast."
+        ),
+    )
+    parser.add_argument(
+        "--package-budget",
+        type=float,
+        default=PACKAGE_BUDGET_SECONDS,
+        metavar="SECONDS",
+        help="How long to wait for the package before launching anyway.",
+    )
+    parser.add_argument(
+        "--simulate-package-status",
+        default=None,
+        type=simulatable_status,
+        metavar="STATUS",
+        help=(
+            "Pretend the package reports STATUS (e.g. Disabled, or 'unreadable') "
+            "instead of asking Windows. For exercising the wait without an update."
+        ),
+    )
+
+
+# A simulated package has no executable on disk, so it can never be launched -
+# which is the right safety answer, but it means simulating Ok would silently
+# poll to budget-exhausted instead of the success it looks like it is asking for.
+def simulatable_status(value: str) -> str:
+    if value.casefold() == PACKAGE_STATUS_OK.casefold():
+        raise argparse.ArgumentTypeError(
+            "cannot simulate Ok - that is the real state; use --verify on its own"
+        )
+    return value
 
 
 def add_profile_flags(parser: argparse.ArgumentParser) -> None:
@@ -136,6 +206,7 @@ def result_as_dict(result, *, dry_run: bool) -> dict:
         "observed_profile_conflict": result.profile_conflict,
         "launch_profile_dir": result.launch_profile_dir,
         "profile_source": result.profile_source,
+        "package_status": result.package_status,
     }
 
 
@@ -145,6 +216,8 @@ def print_result(result, *, dry_run: bool) -> None:
     else:
         print("matched pids: none")
     print_profile(result, dry_run=dry_run)
+    if result.package_status:
+        print(f"package: {result.package_status}")
     if dry_run:
         print("dry-run: nothing killed, nothing launched")
         return
