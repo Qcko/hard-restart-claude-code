@@ -104,7 +104,9 @@ Notes for anyone writing a reader:
 - The file is written temp-then-renamed, falling back to a plain overwrite when the rename fails - which it does, permanently, under MSIX path virtualization. A reader may therefore see a torn file on rare occasions and should treat an unparseable read as a skipped frame rather than an error.
 - **Publishing never breaks the restart.** If the file cannot be written, `hrcc` carries on and warns.
 
-Without `--progress-file`, a verifying run publishes into `~/.hrcc/`. A bare `hrcc` publishes nothing, and neither does `--dry-run`, which changes nothing by definition.
+- **One run at a time per file.** The state slot and the trace are single-writer. Two `hrcc` runs pointed at the same path will interleave, and nothing yet stops them.
+
+Without `--progress-file`, a verifying run publishes into `~/.hrcc/`. A bare `hrcc` publishes nothing, and neither does `--dry-run`, which changes nothing by definition. Given the flag explicitly, an unverified run still publishes `stopping` and then a terminal phase - every path that ends a restart leaves one behind, because a file parked on `stopping` forever cannot be told from a hung restart.
 
 ### Exit codes
 

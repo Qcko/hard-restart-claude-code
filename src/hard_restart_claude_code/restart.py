@@ -7,6 +7,7 @@ import subprocess
 import time
 import winreg
 from collections.abc import Callable, Sequence
+from typing import NoReturn
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -30,6 +31,8 @@ CURRENT_VERSION_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion"
 PROGRAM_FILES_VALUE = "ProgramFilesDir"
 EXE_RELATIVE = Path("app") / "claude.exe"
 PROFILE_FLAG = "--user-data-dir"
+
+MISSING_PACKAGE = "The Claude package is not available"
 
 PACKAGE_POLL_SECONDS = 1.0
 PACKAGE_BUDGET_SECONDS = 120.0
@@ -580,6 +583,7 @@ def hard_restart(
     elif pids:
         effects.sleeper(waits.settle_seconds)
     if no_launch:
+        effects.progress.publish(PHASE_DONE, "Claude Desktop stopped")
         return outcome(launched=False)
     launched = _launch_verified(
         exe, launch_profile_dir(profile, profiles), waits, gate, effects, pids
@@ -623,8 +627,16 @@ def _launch_verified(
         target = gated_exe or exe
         if not gate.enabled:
             if not target.exists():
+                # Published path-free, then raised in full: the caller needs the
+                # path and the widget must never be handed one.
+                effects.progress.publish(
+                    PHASE_FAILED,
+                    MISSING_PACKAGE,
+                    error=MISSING_PACKAGE,
+                )
                 raise FileNotFoundError(f"Claude Desktop exe not found: {target}")
             effects.launcher(target, profile_dir)
+            effects.progress.publish(PHASE_DONE, "Claude Desktop is running")
             return LaunchOutcome(target, package_status, attempt)
         verdict = _attempt(target, profile_dir, waits, effects, attempt)
         if verdict.up:
@@ -660,7 +672,7 @@ def _attempt(
         return UpVerdict(
             up=False,
             retryable=True,
-            headline="The Claude package is not available",
+            headline=MISSING_PACKAGE,
             reason=f"Claude Desktop exe not found: {exe}",
         )
     effects.progress.publish(
@@ -767,7 +779,7 @@ def _fail(
     reason: str,
     killed: Sequence[int] = (),
     attempts: int = 0,
-) -> None:
+) -> NoReturn:
     effects.progress.publish(
         PHASE_FAILED, headline, attempt=attempts, error=headline
     )

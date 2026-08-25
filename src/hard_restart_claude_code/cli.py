@@ -131,13 +131,14 @@ def report_package_status(status: str, progress: Progress) -> None:
 # put that consumer's name in this tool's source, which is the dependency
 # inversion the profile design already refuses. A caller passes its own path.
 def build_progress(args) -> Progress:
+    verifying = wants_verification(args)
     file = args.progress_file
     if args.dry_run:
         # A dry run changes nothing, and a state file is a change.
         file = None
-    elif file is None and wants_verification(args):
+    elif file is None and verifying:
         file = default_progress_file()
-    attempts = DEFAULT_WAITS.launch_attempts if wants_verification(args) else 1
+    attempts = DEFAULT_WAITS.launch_attempts if verifying else 1
     return open_progress(file, label=args.label, max_attempts=attempts, log=warn)
 
 
@@ -147,7 +148,7 @@ def build_progress(args) -> Progress:
 def warn(message: str) -> None:
     try:
         print(message, file=sys.stderr)
-    except OSError:
+    except Exception:
         pass
 
 

@@ -72,6 +72,8 @@ class Progress:
     log: Callable[[str], None] = _ignore
     started_at: str = field(default_factory=timestamp)
     _rename_works: bool = True
+    _trace_started: bool = False
+    _attempt: int = 0
 
     def publish(self, phase: str, detail: str, **extra) -> None:
         if self.file is None:
@@ -86,6 +88,12 @@ class Progress:
     def _record(self, phase: str, detail: str, extra: dict) -> dict:
         if phase not in PHASES:
             raise ValueError(f"unknown restart phase '{phase}'")
+        _reject_unknown(extra)
+        # The attempt is carried, not passed by every call site. The package
+        # gate has no attempt of its own to report, and defaulting it to zero
+        # made its frames wind a reader's counter back to "attempt 0 of 8"
+        # in the middle of attempt three.
+        self._attempt = extra.pop("attempt", self._attempt)
         record = {
             "schemaVersion": SCHEMA_VERSION,
             "pid": os.getpid(),
@@ -95,7 +103,7 @@ class Progress:
             "updatedAt": timestamp(),
             "phase": phase,
             "detail": detail,
-            "attempt": 0,
+            "attempt": self._attempt,
             "packageStatus": None,
             "error": None,
         }
@@ -118,7 +126,9 @@ class Progress:
         if not self._rename_works:
             self._overwrite(payload)
             return
-        temp = self.file.with_suffix(self.file.suffix + ".tmp")
+        # Per-pid, so two runs racing on one path cannot consume each other's
+        # temp file. They still share the slot - see "one run at a time".
+        temp = self.file.with_suffix(f"{self.file.suffix}.{os.getpid()}.tmp")
         try:
             _write_text(temp, payload)
             os.replace(temp, self.file)
@@ -134,20 +144,24 @@ class Progress:
     # evidence of the CURRENT phase and never of the run: a fast success looks
     # exactly like a run where the package gate never fired. The trace is what
     # makes a finished restart readable afterwards.
+    # A fresh trace per run: it exists to explain one restart, and a file that
+    # grew across every restart would need pruning nobody would write. Truncating
+    # on the FIRST append rather than at construction keeps that true however the
+    # publisher was made - a directly built one used to append to the previous
+    # run's trace and interleave two restarts in one file.
     def _append_trace(self, record: dict) -> None:
         try:
-            with open(self._trace_file(), "a", encoding="utf-8", newline="\n") as out:
+            mode = "a" if self._trace_started else "w"
+            with open(self._trace_file(), mode, encoding="utf-8", newline="\n") as out:
                 out.write(json.dumps(record) + "\n")
+            self._trace_started = True
         except Exception as err:
             self.warn(f"could not append to the restart trace ({err})")
 
-    # A fresh trace per run: it exists to explain one restart, and a file that
-    # grew across every restart would need pruning nobody would write.
     def begin(self) -> None:
         if self.file is None:
             return
         self.file.parent.mkdir(parents=True, exist_ok=True)
-        _discard(self._trace_file())
 
     def _trace_file(self) -> Path:
         return self.file.with_suffix(self.file.suffix + TRACE_SUFFIX)
@@ -160,6 +174,18 @@ class Progress:
             self.log(f"warning: {message}")
         except Exception:
             pass
+
+
+# Only the fields a phase is allowed to colour in. Without this, "strict writer"
+# stops at the phase name: an extra could overwrite the phase that was just
+# validated, and a typo would add a junk field instead of being refused.
+MUTABLE_FIELDS = frozenset({"attempt", "packageStatus", "error"})
+
+
+def _reject_unknown(extra: dict) -> None:
+    unknown = sorted(set(extra) - MUTABLE_FIELDS)
+    if unknown:
+        raise ValueError(f"cannot publish unknown field(s): {', '.join(unknown)}")
 
 
 # UTF-8 with no BOM, and \n line endings, because the reader is PowerShell and

@@ -16,6 +16,7 @@ from hard_restart_claude_code.progress import (
     PHASE_LAUNCHING,
     PHASE_STOPPING,
     PHASE_WAITING_DOWN,
+    PHASE_WAITING_PACKAGE,
     PHASE_WAITING_UP,
     SCHEMA_VERSION,
     Progress,
@@ -106,6 +107,9 @@ def test_the_timestamp_always_carries_an_explicit_offset():
     assert re.search(r"([+-]\d{2}:\d{2}|Z)$", naive)
     aware = timestamp(lambda: datetime(2026, 8, 25, 21, 14, 3, tzinfo=timezone.utc))
     assert aware == "2026-08-25T21:14:03+00:00"
+    # And the offset has to describe the clock it is attached to: a naive UTC
+    # reading stamped with the LOCAL offset carries a suffix and still lies.
+    assert naive.startswith("2026-08-25T21:14:03")
 
 
 def test_the_record_carries_the_documented_shape(tmp_path):
@@ -161,7 +165,9 @@ def test_a_failing_rename_falls_back_to_a_plain_overwrite(tmp_path, monkeypatch)
     # Once is enough to know: the second publish does not try the rename again,
     # and no temp file is left behind on every tick.
     assert len(calls) == 1
-    assert not (tmp_path / "restart-status.json.tmp").exists()
+    # Per-pid, so two runs racing on one path cannot consume each other's temp -
+    # and nothing is left behind on every tick.
+    assert list(tmp_path.glob("*.tmp")) == []
 
 
 def test_a_publish_that_cannot_write_never_reaches_the_restart(tmp_path):
@@ -305,3 +311,96 @@ def test_verifying_defaults_the_file_into_hrccs_own_directory(tmp_path, monkeypa
 
 def test_a_bare_restart_publishes_nothing_at_all():
     assert build_progress(_args([])) is NO_PROGRESS
+
+
+# Strict writer, past the phase name too. Without this an extra could overwrite
+# the phase that was just validated, and a typo would add a junk field rather
+# than being refused.
+def test_a_publish_cannot_smuggle_in_unknown_fields(tmp_path):
+    warnings: list[str] = []
+    progress = _progress(tmp_path, log=warnings.append)
+    progress.publish(PHASE_DONE, "fine")
+    progress.publish(PHASE_LAUNCHING, "starting", packagestatus="Disabled")
+    progress.publish(PHASE_LAUNCHING, "starting", schemaVersion=99)
+    assert _state(progress)["phase"] == PHASE_DONE
+    assert len(warnings) == 2
+
+
+# The package gate has no attempt of its own. Defaulting it to zero wound a
+# reader's counter back to "attempt 0 of 8" in the middle of attempt three.
+def test_a_package_frame_does_not_wind_the_attempt_back(tmp_path):
+    progress = _progress(tmp_path, max_attempts=8)
+    progress.publish(PHASE_LAUNCHING, "Starting Claude Desktop", attempt=3)
+    progress.publish(PHASE_WAITING_PACKAGE, "Waiting", packageStatus="Disabled")
+    assert _state(progress)["attempt"] == 3
+
+
+# The per-run trace has to hold however the publisher was built, or a second run
+# interleaves into the first one's file with nothing separating them.
+def test_the_trace_is_fresh_even_without_begin(tmp_path):
+    first = _progress(tmp_path)
+    first.publish(PHASE_STOPPING, "Stopping Claude Desktop")
+    second = _progress(tmp_path)
+    second.publish(PHASE_DONE, "Claude Desktop is running")
+    assert [record["phase"] for record in _trace(second)] == [PHASE_DONE]
+
+
+def test_a_non_ascii_label_survives_the_round_trip(tmp_path):
+    progress = _progress(tmp_path, label="r\u00e9serve")
+    progress.publish(PHASE_DONE, "Claude Desktop is running")
+    assert _state(progress)["label"] == "r\u00e9serve"
+
+
+def _unhardened(tmp_path, progress, desktop, exe=None):
+    clock = Clock()
+    return hard_restart(
+        exe or _exe(tmp_path),
+        waits=WAITS,
+        effects=Effects(
+            finder=desktop.find,
+            killer=desktop.kill,
+            launcher=desktop.launch,
+            sleeper=clock.sleep,
+            clock=clock,
+            progress=progress,
+        ),
+    )
+
+
+# A progress file parked on "stopping" forever is worse than no progress file:
+# the reader cannot tell a finished restart from a hung one.
+def test_an_unverified_run_still_reaches_a_terminal_phase(tmp_path):
+    progress = _progress(tmp_path)
+    _unhardened(tmp_path, progress, Desktop())
+    assert _state(progress)["phase"] == PHASE_DONE
+
+
+def test_stopping_without_launching_reaches_a_terminal_phase(tmp_path):
+    progress = _progress(tmp_path)
+    clock = Clock()
+    desktop = Desktop()
+    hard_restart(
+        _exe(tmp_path),
+        no_launch=True,
+        waits=WAITS,
+        effects=Effects(
+            finder=desktop.find,
+            killer=desktop.kill,
+            launcher=desktop.launch,
+            sleeper=clock.sleep,
+            clock=clock,
+            progress=progress,
+        ),
+    )
+    assert _state(progress)["phase"] == PHASE_DONE
+
+
+def test_an_unverified_missing_exe_publishes_a_path_free_failure(tmp_path):
+    progress = _progress(tmp_path)
+    exe = _exe(tmp_path)
+    exe.unlink()
+    with pytest.raises(FileNotFoundError):
+        _unhardened(tmp_path, progress, Desktop(), exe=exe)
+    state = _state(progress)
+    assert state["phase"] == PHASE_FAILED
+    assert str(tmp_path) not in f"{state['detail']} {state['error']}"
