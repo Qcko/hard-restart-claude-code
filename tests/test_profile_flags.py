@@ -15,10 +15,11 @@ from hard_restart_claude_code.cli import (
     result_as_dict,
 )
 from hard_restart_claude_code.restart import (
+    ClaudeProcess,
+    Effects,
     PROFILE_SOURCE_EXPLICIT,
     PROFILE_SOURCE_INFERRED,
     PROFILE_SOURCE_NONE,
-    ClaudeProcess,
     ProfileChoice,
     ProfileDirError,
     Result,
@@ -100,10 +101,12 @@ def _restart(profile: ProfileChoice, tmp_path, observed: str | None = OBSERVED_D
     result = hard_restart(
         exe,
         profile=profile,
-        finder=lambda: [ClaudeProcess(pid=1, profile_dir=observed)],
-        killer=lambda _pids: None,
-        launcher=lambda _e, dir_: launched.append(dir_),
-        sleeper=lambda _s: None,
+        effects=Effects(
+            finder=lambda: [ClaudeProcess(pid=1, profile_dir=observed)],
+            killer=lambda _pids: None,
+            launcher=lambda _e, dir_: launched.append(dir_),
+            sleeper=lambda _s: None,
+        ),
     )
     return result, launched
 
@@ -176,10 +179,12 @@ def test_library_allows_no_launch_with_an_explicit_dir(tmp_path):
         exe,
         no_launch=True,
         profile=ProfileChoice(explicit=EXPLICIT_DIR),
-        finder=lambda: [ClaudeProcess(pid=1, profile_dir=OBSERVED_DIR)],
-        killer=lambda _pids: None,
-        launcher=lambda _e, dir_: launched.append(dir_),
-        sleeper=lambda _s: None,
+        effects=Effects(
+            finder=lambda: [ClaudeProcess(pid=1, profile_dir=OBSERVED_DIR)],
+            killer=lambda _pids: None,
+            launcher=lambda _e, dir_: launched.append(dir_),
+            sleeper=lambda _s: None,
+        ),
     )
     assert launched == []
     assert result.launched is False

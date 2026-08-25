@@ -7,13 +7,14 @@ import pytest
 from hard_restart_claude_code import restart as restart_module
 from hard_restart_claude_code.cli import build_gate, build_parser
 from hard_restart_claude_code.restart import (
+    ClaudePackage,
+    ClaudeProcess,
+    CompletedLike,
+    Effects,
     PACKAGE_STATUS_BUDGET_SPENT,
     PACKAGE_STATUS_NOT_REGISTERED,
     PACKAGE_STATUS_OK,
     PACKAGE_STATUS_UNREADABLE,
-    ClaudePackage,
-    ClaudeProcess,
-    CompletedLike,
     PackageGate,
     PackageReport,
     await_package_ready,
@@ -227,10 +228,12 @@ def test_restart_still_launches_when_the_gate_gives_up(tmp_path):
     result = hard_restart(
         exe,
         gate=_gate(lambda: PackageReport(readable=False), clock),
-        finder=lambda: [ClaudeProcess(pid=1)],
-        killer=lambda _pids: None,
-        launcher=lambda e, _dir: launched.append(e),
-        sleeper=lambda _s: None,
+        effects=Effects(
+            finder=lambda: [ClaudeProcess(pid=1)],
+            killer=lambda _pids: None,
+            launcher=lambda e, _dir: launched.append(e),
+            sleeper=lambda _s: None,
+        ),
     )
     assert launched == [exe]
     assert result.launched is True
@@ -247,10 +250,12 @@ def test_restart_launches_the_exe_the_gate_chose(monkeypatch, tmp_path):
     result = hard_restart(
         stale,
         gate=_gate(lambda: PackageReport(True, (package,)), clock),
-        finder=lambda: [ClaudeProcess(pid=1)],
-        killer=lambda _pids: None,
-        launcher=lambda e, _dir: launched.append(e),
-        sleeper=lambda _s: None,
+        effects=Effects(
+            finder=lambda: [ClaudeProcess(pid=1)],
+            killer=lambda _pids: None,
+            launcher=lambda e, _dir: launched.append(e),
+            sleeper=lambda _s: None,
+        ),
     )
     assert launched == [package.exe]
     assert result.exe == package.exe

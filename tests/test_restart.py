@@ -8,6 +8,7 @@ import pytest
 from hard_restart_claude_code.restart import (
     ClaudeProcess,
     CompletedLike,
+    Effects,
     Result,
     discover_exe,
     distinct_profile_dirs,
@@ -208,13 +209,15 @@ def test_hard_restart_kills_then_launches_with_profile(tmp_path):
 
     result = hard_restart(
         exe,
-        finder=lambda: [
-            ClaudeProcess(pid=10),
-            ClaudeProcess(pid=11, profile_dir=r"D:\reserve"),
-        ],
-        killer=lambda pids: events.append(("kill", pids)),
-        launcher=lambda e, profile: events.append(("launch", e, profile)),
-        sleeper=lambda _s: events.append(("sleep",)),
+        effects=Effects(
+            finder=lambda: [
+                ClaudeProcess(pid=10),
+                ClaudeProcess(pid=11, profile_dir=r"D:\reserve"),
+            ],
+            killer=lambda pids: events.append(("kill", pids)),
+            launcher=lambda e, profile: events.append(("launch", e, profile)),
+            sleeper=lambda _s: events.append(("sleep",)),
+        ),
     )
     assert result == Result(
         killed=[10, 11],
@@ -237,10 +240,12 @@ def test_hard_restart_launches_bare_when_no_profile_in_use(tmp_path):
 
     hard_restart(
         exe,
-        finder=lambda: [ClaudeProcess(pid=10)],
-        killer=lambda _pids: None,
-        launcher=lambda e, profile: events.append(("launch", e, profile)),
-        sleeper=lambda _s: None,
+        effects=Effects(
+            finder=lambda: [ClaudeProcess(pid=10)],
+            killer=lambda _pids: None,
+            launcher=lambda e, profile: events.append(("launch", e, profile)),
+            sleeper=lambda _s: None,
+        ),
     )
     assert events == [("launch", exe, None)]
 
@@ -252,10 +257,12 @@ def test_hard_restart_skips_kill_when_no_pids(tmp_path):
 
     hard_restart(
         exe,
-        finder=lambda: [],
-        killer=lambda pids: events.append(("kill", pids)),
-        launcher=lambda e, profile: events.append(("launch", e, profile)),
-        sleeper=lambda _s: events.append(("sleep",)),
+        effects=Effects(
+            finder=lambda: [],
+            killer=lambda pids: events.append(("kill", pids)),
+            launcher=lambda e, profile: events.append(("launch", e, profile)),
+            sleeper=lambda _s: events.append(("sleep",)),
+        ),
     )
     assert events == [("launch", exe, None)]
 
@@ -267,10 +274,12 @@ def test_hard_restart_dry_run_reports_profile_without_acting(tmp_path):
     result = hard_restart(
         exe,
         dry_run=True,
-        finder=lambda: [ClaudeProcess(pid=99, profile_dir=r"D:\reserve")],
-        killer=lambda _pids: events.append("kill"),
-        launcher=lambda _e, _p: events.append("launch"),
-        sleeper=lambda _s: events.append("sleep"),
+        effects=Effects(
+            finder=lambda: [ClaudeProcess(pid=99, profile_dir=r"D:\reserve")],
+            killer=lambda _pids: events.append("kill"),
+            launcher=lambda _e, _p: events.append("launch"),
+            sleeper=lambda _s: events.append("sleep"),
+        ),
     )
     assert result.killed == [99]
     assert result.launched is False
@@ -285,10 +294,12 @@ def test_hard_restart_no_launch_kills_only(tmp_path):
     result = hard_restart(
         exe,
         no_launch=True,
-        finder=lambda: [ClaudeProcess(pid=7, profile_dir=r"D:\reserve")],
-        killer=lambda pids: events.append(("kill", pids)),
-        launcher=lambda _e, _p: events.append("launch"),
-        sleeper=lambda _s: None,
+        effects=Effects(
+            finder=lambda: [ClaudeProcess(pid=7, profile_dir=r"D:\reserve")],
+            killer=lambda pids: events.append(("kill", pids)),
+            launcher=lambda _e, _p: events.append("launch"),
+            sleeper=lambda _s: None,
+        ),
     )
     assert result == Result(
         killed=[7],
@@ -305,10 +316,12 @@ def test_hard_restart_missing_exe_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         hard_restart(
             missing,
-            finder=lambda: [],
-            killer=lambda _pids: None,
-            launcher=lambda _e, _p: None,
-            sleeper=lambda _s: None,
+            effects=Effects(
+                finder=lambda: [],
+                killer=lambda _pids: None,
+                launcher=lambda _e, _p: None,
+                sleeper=lambda _s: None,
+            ),
         )
 
 
@@ -414,13 +427,15 @@ def test_hard_restart_flags_conflict_when_two_profiles_run(tmp_path):
 
     result = hard_restart(
         exe,
-        finder=lambda: [
-            ClaudeProcess(pid=1, profile_dir=r"D:\reserve"),
-            ClaudeProcess(pid=2, profile_dir=r"D:\other"),
-        ],
-        killer=lambda _pids: None,
-        launcher=lambda e, profile: launched.append(profile),
-        sleeper=lambda _s: None,
+        effects=Effects(
+            finder=lambda: [
+                ClaudeProcess(pid=1, profile_dir=r"D:\reserve"),
+                ClaudeProcess(pid=2, profile_dir=r"D:\other"),
+            ],
+            killer=lambda _pids: None,
+            launcher=lambda e, profile: launched.append(profile),
+            sleeper=lambda _s: None,
+        ),
     )
     assert result.profile_conflict is True
     assert result.profile_dir == r"D:\reserve"
@@ -433,13 +448,15 @@ def test_hard_restart_reports_no_conflict_for_single_profile(tmp_path):
 
     result = hard_restart(
         exe,
-        finder=lambda: [
-            ClaudeProcess(pid=1, profile_dir=r"D:\reserve"),
-            ClaudeProcess(pid=2, profile_dir=r"D:\reserve"),
-        ],
-        killer=lambda _pids: None,
-        launcher=lambda _e, _p: None,
-        sleeper=lambda _s: None,
+        effects=Effects(
+            finder=lambda: [
+                ClaudeProcess(pid=1, profile_dir=r"D:\reserve"),
+                ClaudeProcess(pid=2, profile_dir=r"D:\reserve"),
+            ],
+            killer=lambda _pids: None,
+            launcher=lambda _e, _p: None,
+            sleeper=lambda _s: None,
+        ),
     )
     assert result.profile_conflict is False
 

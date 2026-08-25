@@ -353,8 +353,8 @@ def _ignore_status(_status: str) -> None:
 # to service it, and a launch landing in that window fails outright. Wait it out
 # - but the gate FAILS OPEN: if it cannot read the package state, or the budget
 # runs out, launch anyway. A check that cannot verify must never become the
-# reason a working restart does not happen. Carried as one object because
-# hard_restart is over the Rule of 7 already.
+# reason a working restart does not happen. Carried as one object so it costs
+# hard_restart one parameter rather than six.
 @dataclass(frozen=True)
 class PackageGate:
     enabled: bool = False
@@ -412,6 +412,21 @@ def launch(
     launcher(exe, profile_dir)
 
 
+# The injected side effects, grouped. DESIGN.md's "inject side effects"
+# principle is why they exist; keeping them in one object is what stops
+# hard_restart's signature growing a parameter every time the restart learns to
+# check one more thing.
+@dataclass(frozen=True)
+class Effects:
+    finder: Callable[[], list[ClaudeProcess]] = find_processes
+    killer: Callable[[list[int]], None] = kill_pids
+    launcher: Callable[[Path, str | None], None] = launch
+    sleeper: Callable[[float], None] = time.sleep
+
+
+DEFAULT_EFFECTS = Effects()
+
+
 def hard_restart(
     exe: Path,
     *,
@@ -420,12 +435,9 @@ def hard_restart(
     settle_seconds: float = 1.0,
     profile: ProfileChoice = INFERRED,
     gate: PackageGate = NO_GATE,
-    finder: Callable[[], list[ClaudeProcess]] = find_processes,
-    killer: Callable[[list[int]], None] = kill_pids,
-    launcher: Callable[[Path, str | None], None] = launch,
-    sleeper: Callable[[float], None] = time.sleep,
+    effects: Effects = DEFAULT_EFFECTS,
 ) -> Result:
-    processes = finder()
+    processes = effects.finder()
     pids = [process.pid for process in processes]
     profiles = distinct_profile_dirs(processes)
     outcome = _partial_result(exe, pids, profiles, profile)
@@ -439,8 +451,8 @@ def hard_restart(
             launched=False, package_status=dry_status
         )
     if pids:
-        killer(pids)
-        sleeper(settle_seconds)
+        effects.killer(pids)
+        effects.sleeper(settle_seconds)
     if no_launch:
         return outcome(launched=False)
     # Resolve the exe AFTER the kill, not before: an update that lands while
@@ -450,7 +462,7 @@ def hard_restart(
     exe = gated_exe or exe
     if not exe.exists():
         raise FileNotFoundError(f"Claude Desktop exe not found: {exe}")
-    launcher(exe, launch_profile_dir(profile, profiles))
+    effects.launcher(exe, launch_profile_dir(profile, profiles))
     return _partial_result(exe, pids, profiles, profile)(
         launched=True, package_status=package_status
     )

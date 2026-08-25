@@ -52,7 +52,9 @@ Consequences for structure:
 - `find_pids` becomes `find_processes`, returning `ClaudeProcess` records
   (`pid`, `path`, `profile_dir`). The profile therefore arrives through the
   existing injected `finder` seam, so `hard_restart` gains no new parameter — it
-  is already at the Rule of 7 limit.
+  is already at the Rule of 7 limit. The four injected collaborators are
+  therefore grouped into one `Effects` object, and each later capability the
+  restart learns costs one field there rather than one more parameter.
 - `Result` gains `profile_dir` so the CLI can report what it preserved.
 
 ### The matcher stays narrow, deliberately
