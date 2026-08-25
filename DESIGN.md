@@ -280,8 +280,20 @@ into the package container and state written there was invisible from outside it
 The display string travels as `label`, never `account`: hrcc knows a directory
 and a caption, and nothing about who is logged in. Hardcoding a consumer's path would put that consumer's name in this
 tool's source, which is the same dependency inversion the profile design already
-refuses. `account-swap` passes its existing path, so its widget and its directory
-are untouched.
+refuses. `account-swap` passes its own path explicitly rather than leaning on that
+default, so neither tool depends on the other's idea of where the file goes.
+
+**That path is under the home directory, and the reason is measured rather than
+stylistic.** A process inside Claude Desktop's MSIX package has its
+`%LOCALAPPDATA%` writes redirected into the package's `LocalCache`, invisible to
+anything outside it, while reads fall through the other way - so the mismatch
+never errors, it just goes quiet. A WMI-spawned probe outside the package
+(25-08-2026) saw 3 files in a directory where an in-container process saw 21.
+Both ends of this channel sit inside the container today, so `%LOCALAPPDATA%`
+would work today; the home directory is what keeps working when one end moves -
+a widget launched from a shortcut, or the WMI-spawned relaunch helper this
+project has already prototyped. It is the same reason `~/.hrcc` replaced
+`%LOCALAPPDATA%\hrcc` for hrcc's own state.
 
 The file is single-slot and rewritten on every publish. Its contract:
 
