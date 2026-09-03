@@ -229,6 +229,24 @@ def test_survey_distinguishes_no_processes_from_no_answer():
         assert survey_processes(lambda _cmd, b=broken: b).readable is False
 
 
+def test_survey_reads_a_command_line_holding_a_raw_control_character():
+    # ConvertTo-Json emits control characters raw instead of escaping them, and a
+    # real Claude command line carried a literal \x07 in --desktop-managed-config.
+    # Strict JSON rejects the whole document over that one byte, which read as
+    # "unreadable" and blocked every restart on the machine.
+    stdout = (
+        '[{"ProcessId": 4321,'
+        ' "ExecutablePath": "C:\\\\Program Files\\\\WindowsApps'
+        '\\\\Claude_1.0.0.0_x64__abc\\\\app\\\\claude.exe",'
+        ' "CommandLine": "claude.exe --desktop-managed-config=\x07'
+        ' --user-data-dir=C:\\\\data"}]'
+    )
+    report = survey_processes(lambda _cmd: CompletedLike(stdout=stdout))
+    assert report.readable is True
+    assert [process.pid for process in report.processes] == [4321]
+    assert report.processes[0].profile_dir == "C:\\data"
+
+
 def test_survey_treats_a_runner_that_raises_as_unreadable():
     def explode(_cmd):
         raise OSError("powershell is not there")

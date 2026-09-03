@@ -320,8 +320,14 @@ def _decode_rows_or_none(stdout: str) -> list[dict] | None:
     text = stdout.strip()
     if not text:
         return None
+    # strict=False because ConvertTo-Json emits raw control characters instead of
+    # escaping them, and a Claude command line really does carry one: an observed
+    # --desktop-managed-config held a literal \x07. Strict parsing rejects the
+    # whole document over that one byte, which reads as "unreadable" and blocks
+    # every restart on the machine. What is wanted here is a pid, a path and a
+    # command line; a stray control byte inside one changes none of them.
     try:
-        decoded = json.loads(text)
+        decoded = json.loads(text, strict=False)
     except ValueError:
         return None
     if isinstance(decoded, dict):
